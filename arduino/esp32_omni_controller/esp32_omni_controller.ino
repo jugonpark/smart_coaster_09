@@ -35,12 +35,12 @@ constexpr uint32_t SERIAL_BAUD = 115200;
 
 // ---- Wi-Fi ----
 // 반드시 실제 공유기 정보로 바꿔주세요.
-const char *WIFI_SSID = "CHANGE_ME";
-const char *WIFI_PASS = "CHANGE_ME";
+const char *WIFI_SSID = "jg";
+const char *WIFI_PASS = "jugon0607!";
 
-// Raspberry Pi config의 GRISE_ESP32_IP와 맞춰야 한다.
-// 실제 공유기 대역과 gateway는 현장에서 확인하세요.
-constexpr bool USE_STATIC_IP = true;
+// 개발/실물 시험은 DHCP를 사용한다. 전용 공유기에서 고정 IP가 필요할 때만
+// true로 바꾸고 아래 IP/gateway/subnet을 실제 공유기 대역에 맞춘다.
+constexpr bool USE_STATIC_IP = false;
 IPAddress LOCAL_IP(10, 182, 7, 50);
 IPAddress GATEWAY (10, 182, 7, 110);
 IPAddress SUBNET(255, 255, 255, 0);
@@ -50,6 +50,8 @@ constexpr uint16_t UDP_PORT = 8888;
 constexpr uint16_t TELEMETRY_PORT = 8889;  // NEW: reply to Raspberry Pi
 constexpr uint32_t CMD_TIMEOUT_MS = 300;
 constexpr uint32_t WIFI_RETRY_MS = 3000;
+constexpr bool UDP_DIAGNOSTICS = true;
+constexpr uint32_t UDP_DIAGNOSTIC_INTERVAL_MS = 1000;
 
 // ---- PWM ----
 constexpr uint32_t PWM_FREQUENCY = 20000;
@@ -94,9 +96,9 @@ constexpr float MAX_GOAL_DISTANCE_CM = 100.0f;
 constexpr int64_t MAX_ENCODER_DELTA_PER_TICK = 2000; // reject implausible jumps
 
 // 8-bit PWM용 보수적 초기값. 실제 로봇에서 반드시 튜닝할 것.
-float PID_KP = 3.0f;
-float PID_KI = 8.0f;
-float PID_KD = 0.05f;
+float PID_KP = 2.6f;
+float PID_KI = 1.3f;
+float PID_KD = 0.0f;
 
 // 엔코더 순간 속도 LPF: new = old*(1-a) + raw*a
 constexpr float SPEED_FILTER_ALPHA = 0.30f;
@@ -156,6 +158,7 @@ ControlMode controlMode = MODE_NETWORK;
 
 WiFiUDP udp;
 bool udpStarted = false;
+bool wifiConnectionAnnounced = false;
 IPAddress controllerIp;
 bool controllerIpKnown = false;
 uint32_t lastTelemetryUdpMs = 0;
@@ -199,6 +202,11 @@ BodyDelta actionDelta = {0.0f, 0.0f, 0.0f};
 int32_t goalPreviousCounts[MOTOR_COUNT] = {0, 0, 0};
 uint32_t goalStartMs = 0;
 uint32_t lastStatusPrintMs = 0;
+uint32_t udpRxPackets = 0;
+uint32_t udpAcceptedPackets = 0;
+uint32_t udpRejectedPackets = 0;
+uint32_t lastUdpPacketMs = 0;
+uint32_t lastUdpDiagnosticMs = 0;
 
 // =====================================================
 // 4) ENCODER ISR
@@ -453,7 +461,7 @@ void applySlowCaps(float &vx, float &vy, float &w) {
     w = clampMagnitude(w, SLOW_MAX_ANGULAR_RAD_S);
 }
 
-void failClosedStop(const char *reason) {
+void applyFailClosedStop(const char *reason, bool printReason) {
     goalMode = STOPPED;
     goalArmed = false;
     cmdVx = 0.0f;
@@ -462,8 +470,34 @@ void failClosedStop(const char *reason) {
     cmdStatus = "STOP";
     stopAllMotors(false);
     networkStopped = true;
-    Serial.print("[SAFETY] network command rejected: ");
-    Serial.println(reason);
+    if (printReason) {
+        Serial.print("[SAFETY] network command rejected: ");
+        Serial.println(reason);
+    }
+}
+
+void failClosedStop(const char *reason) {
+    applyFailClosedStop(reason, true);
+}
+
+void rejectUdpCommand(const char *reason, const IPAddress &remoteIp, uint16_t remotePort) {
+    udpRejectedPackets++;
+    applyFailClosedStop(reason, false);
+    const uint32_t now = millis();
+    if (!UDP_DIAGNOSTICS || now - lastUdpDiagnosticMs < UDP_DIAGNOSTIC_INTERVAL_MS) return;
+    lastUdpDiagnosticMs = now;
+    Serial.print("[UDP RX] rejected reason=");
+    Serial.print(reason);
+    Serial.print(" from=");
+    Serial.print(remoteIp);
+    Serial.print(":");
+    Serial.print(remotePort);
+    Serial.print(" totals(rx/ok/reject)=");
+    Serial.print(udpRxPackets);
+    Serial.print("/");
+    Serial.print(udpAcceptedPackets);
+    Serial.print("/");
+    Serial.println(udpRejectedPackets);
 }
 
 bool readFiniteNumber(JsonVariantConst field, float &value) {
@@ -485,13 +519,17 @@ void receiveUdpCommands() {
 
     int packetSize = udp.parsePacket();
     while (packetSize > 0) {
+        const IPAddress remoteIp = udp.remoteIP();
+        const uint16_t remotePort = udp.remotePort();
+        udpRxPackets++;
+        lastUdpPacketMs = millis();
         if (packetSize >= (int)sizeof(packetBuffer)) {
             while (udp.available() > 0) udp.read();
-            failClosedStop("oversized packet");
+            rejectUdpCommand("oversized packet", remoteIp, remotePort);
         } else {
             const int len = udp.read(packetBuffer, sizeof(packetBuffer) - 1);
             if (len <= 0) {
-                failClosedStop("empty packet");
+                rejectUdpCommand("empty packet", remoteIp, remotePort);
             } else {
                 packetBuffer[len] = '\0';
 
@@ -499,7 +537,8 @@ void receiveUdpCommands() {
                 const DeserializationError error = deserializeJson(doc, packetBuffer);
 
                 if (error || !doc.is<JsonObject>()) {
-                    failClosedStop("invalid JSON");
+                    rejectUdpCommand(error ? error.c_str() : "JSON root is not object",
+                                     remoteIp, remotePort);
                 } else {
                     const JsonVariantConst seqField = doc["seq"];
                     const JsonVariantConst statusField = doc["status"];
@@ -510,19 +549,19 @@ void receiveUdpCommands() {
                         !readFiniteNumber(doc["vx"], vx) ||
                         !readFiniteNumber(doc["vy"], vy) ||
                         !readFiniteNumber(doc["w"], w)) {
-                        failClosedStop("missing or invalid command field");
+                        rejectUdpCommand("missing or invalid command field", remoteIp, remotePort);
                     } else {
                         String status(statusField.as<const char*>());
                         status.toUpperCase();
                         const int32_t seq = seqField.as<int32_t>();
                         const uint32_t now = millis();
                         if (!isValidStatus(status)) {
-                            failClosedStop("invalid status");
+                            rejectUdpCommand("invalid status", remoteIp, remotePort);
                         } else if (hypotf(vx, vy) > MAX_CMD_LINEAR_CM_S ||
                                    fabsf(w) > MAX_CMD_ANGULAR_RAD_S) {
-                            failClosedStop("command exceeds speed limit");
+                            rejectUdpCommand("command exceeds speed limit", remoteIp, remotePort);
                         } else if (!acceptSequence(seq, status, now)) {
-                            failClosedStop("duplicate or stale sequence");
+                            rejectUdpCommand("duplicate or stale sequence", remoteIp, remotePort);
                         } else {
                             const bool hasId = !doc["motion_id"].isNull();
                             const bool hasDistance = !doc["target_distance_cm"].isNull();
@@ -534,7 +573,7 @@ void receiveUdpCommands() {
                                            !readFiniteNumber(doc["target_distance_cm"], distance) ||
                                            distance <= 0.0f || distance > MAX_GOAL_DISTANCE_CM ||
                                            fabsf(w) > 0.001f || hypotf(vx, vy) < 0.01f))) {
-                                failClosedStop("invalid distance goal");
+                                rejectUdpCommand("invalid distance goal", remoteIp, remotePort);
                                 packetSize = udp.parsePacket();
                                 continue;
                             }
@@ -567,7 +606,8 @@ void receiveUdpCommands() {
                                 } else if (fabsf(distance - goalTargetCm) > 0.001f ||
                                            fabsf(vx / hypotf(vx, vy) - goalUx) > 0.001f ||
                                            fabsf(vy / hypotf(vx, vy) - goalUy) > 0.001f) {
-                                    failClosedStop("goal changed under same motion id");
+                                    rejectUdpCommand("goal changed under same motion id",
+                                                     remoteIp, remotePort);
                                     packetSize = udp.parsePacket();
                                     continue;
                                 }
@@ -582,8 +622,29 @@ void receiveUdpCommands() {
                                          status != "STOP") ? "STOP" : status;
                             lastSeq = seq;
                             lastCommandMs = now; // receipt time; Pi epoch t is never compared with millis()
-                            controllerIp = udp.remoteIP();
+                            controllerIp = remoteIp;
                             controllerIpKnown = true;
+                            udpAcceptedPackets++;
+                            if (UDP_DIAGNOSTICS &&
+                                now - lastUdpDiagnosticMs >= UDP_DIAGNOSTIC_INTERVAL_MS) {
+                                lastUdpDiagnosticMs = now;
+                                Serial.print("[UDP RX] accepted seq=");
+                                Serial.print(seq);
+                                Serial.print(" status=");
+                                Serial.print(status);
+                                Serial.print(" vx=");
+                                Serial.print(vx, 2);
+                                Serial.print(" vy=");
+                                Serial.print(vy, 2);
+                                Serial.print(" w=");
+                                Serial.print(w, 2);
+                                Serial.print(" bytes=");
+                                Serial.print(len);
+                                Serial.print(" from=");
+                                Serial.print(remoteIp);
+                                Serial.print(":");
+                                Serial.println(remotePort);
+                            }
                             if (status == "STOP") {
                                 stopAllMotors(false);
                                 networkStopped = true;
@@ -758,10 +819,13 @@ void updateNetworkControl() {
 
 void startUdpIfNeeded() {
     if (WiFi.status() == WL_CONNECTED && !udpStarted) {
-        if (udp.begin(UDP_PORT)) {
+        const bool started = udp.begin(UDP_PORT);
+        Serial.print("[UDP] begin port=");
+        Serial.print(UDP_PORT);
+        Serial.print(" result=");
+        Serial.println(started ? "OK" : "FAILED");
+        if (started) {
             udpStarted = true;
-            Serial.print("[UDP] listening on port ");
-            Serial.println(UDP_PORT);
         }
     }
 }
@@ -783,9 +847,21 @@ void beginWiFi() {
 
 void maintainWiFi() {
     if (WiFi.status() == WL_CONNECTED) {
+        if (!wifiConnectionAnnounced) {
+            wifiConnectionAnnounced = true;
+            Serial.println("[WiFi] connected");
+            Serial.print("[WiFi] IP=");
+            Serial.println(WiFi.localIP());
+            Serial.print("[WiFi] gateway=");
+            Serial.println(WiFi.gatewayIP());
+            Serial.print("[WiFi] subnet=");
+            Serial.println(WiFi.subnetMask());
+        }
         startUdpIfNeeded();
         return;
     }
+
+    wifiConnectionAnnounced = false;
 
     if (udpStarted) {
         udp.stop();
@@ -853,6 +929,15 @@ void printStatus() {
 
     Serial.print("UDP = ");
     Serial.println(udpStarted ? "ON" : "OFF");
+    Serial.print("UDP rx/accepted/rejected = ");
+    Serial.print(udpRxPackets);
+    Serial.print("/");
+    Serial.print(udpAcceptedPackets);
+    Serial.print("/");
+    Serial.println(udpRejectedPackets);
+    Serial.print("UDP last packet age ms = ");
+    if (lastUdpPacketMs == 0) Serial.println("NONE");
+    else Serial.println(millis() - lastUdpPacketMs);
 
     Serial.print("cmd = (");
     Serial.print(cmdVx, 1);

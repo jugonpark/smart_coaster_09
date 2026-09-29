@@ -12,6 +12,10 @@ STOP 명령, invalid packet, Wi-Fi 손실, 300 ms watchdog, 비정상 wheel 수�
 
 Pi의 기존 receiver와 같은 JSON을 유지한다: `type="telemetry"`, `seq`, `ms`(ESP32 uptime), `status`, `rssi`, 길이 3의 `counts`, `rpm`, `wheel_speed`, `target_speed` 배열. 속도 단위는 cm/s다. 추가 `mode`는 `NETWORK` 또는 `MANUAL_PWM`으로 기존 receiver가 무시한다. 비유한 wheel 숫자는 0으로 대체하고 safe STOP한다. `status`는 watchdog 정지 시 STOP을 보고한다.
 
+UDP 진단은 기본 활성화되어 있다. 부팅 시 `[UDP] begin port=8888 result=OK|FAILED`를 출력하고, 유효 명령 또는 거부 패킷은 최대 1초에 한 번 `[UDP RX]`로 송신자와 사유를 출력한다. `STATUS`의 `UDP rx/accepted/rejected`와 `UDP last packet age ms`는 로그 제한과 무관한 누계/경과값이므로 패킷 미도착과 parser 거부를 구분할 때 사용한다. 진단은 수신·검증·STOP safety 흐름을 변경하지 않는다.
+
+개발/테스트 기본값은 `USE_STATIC_IP=false`이며 `WiFi.begin()`이 현재 공유기의 DHCP 주소를 받는다. 연결 직후 IP, gateway, subnet을 한 번 출력하고 `STATUS`에서도 현재 IP를 확인할 수 있다. 전용 공유기에서만 필요에 따라 static IP를 사용하며, 그 경우 저장된 `LOCAL_IP`, `GATEWAY`, `SUBNET`을 실제 공유기 대역에 맞춰야 한다.
+
 ## 핀과 측정 전 가정
 
 | 항목 | GPIO 또는 값 |
@@ -23,7 +27,7 @@ Pi의 기존 receiver와 같은 JSON을 유지한다: `type="telemetry"`, `seq`,
 | Wheel normal angle (robot +X 기준 CCW) | M1 0°, M2 120°, M3 240° |
 | Wheel radius / robot radius | 2.9 cm / 9.0 cm 초기값 |
 | Encoder count 초기 가정 | `RAW_ENCODER_PPR=11`, `GEAR_RATIO=74.83`, `QUADRATURE_MULTIPLIER=1` (A rising만 계수) |
-| PID 초기값 | Kp 3.0, Ki 8.0, Kd 0.05 |
+| PID 초기값 | Kp 2.6, Ki 1.3, Kd 0.0 (2.9 cm wheel의 RPM 기반 PI 값에서 환산한 벤치 시작값) |
 
 `motorReversed`와 `encoderReversed`는 각 M1~M3에 개별 설정 가능하다. 현재 모두 false이며 실제 정방향 명령과 count 증가 방향은 미검증이다. M1~M3의 chassis 실제 위치·wheel 접선 방향, PPR/감속비, GPIO34/35의 외부 pull-up 유무를 측정해야 한다. TB6612 모듈 2개의 네 채널 중 쓰지 않는 한 채널의 IN/PWM을 LOW에 고정하는 배선도 확인한다. 소스는 그 채널의 핀을 할당하지 않는다. Wi-Fi SSID/password는 `CHANGE_ME` placeholder이며 실값을 저장소에 넣지 않는다. 고정 IP/gateway는 현장 네트워크와 Pi `GRISE_ESP32_IP`에 맞춰야 한다.
 
