@@ -36,9 +36,9 @@ constexpr WheelSpeeds inverseKinematicsBody(float vxCmS, float vyCmS,
                                              float wRadS, float robotRadiusCm) {
     constexpr float HALF = 0.5f;
     constexpr float SQRT3_OVER_2 = 0.8660254037844386f;
-    return {{{vyCmS + robotRadiusCm * wRadS,
-              -SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS,
-              SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS}}};
+    return {{vyCmS + robotRadiusCm * wRadS,
+             -SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS,
+             SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS}};
 }
 
 constexpr BodyDelta forwardKinematics(float d1, float d2, float d3,
@@ -103,4 +103,14 @@ constexpr float slewTowards(float current, float target, float ratePerSec,
         return current - maxStep;
     }
     return target;
+}
+
+// Transitional helpers used only by the legacy sketch until Task 6 replaces it.
+constexpr bool canStartDistanceGoal(bool armed, bool networkMode,
+                                    int32_t incomingId, int32_t previousId) {
+    return armed && networkMode && incomingId >= 0 && incomingId != previousId;
+}
+
+constexpr bool distanceGoalReached(float progress, float target, float tolerance) {
+    return progress >= target - tolerance;
 }

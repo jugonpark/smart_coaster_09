@@ -6,6 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "arduino" / "esp32_omni_controller"
 CONFIG = FIRMWARE / "robot_config.h"
 SELF_TEST = FIRMWARE / "firmware_self_test.h"
+MOTOR_HEADER = FIRMWARE / "motor_encoder.h"
+MOTOR_SOURCE = FIRMWARE / "motor_encoder.cpp"
 
 
 def _config_text() -> str:
@@ -83,3 +85,71 @@ def test_compile_time_firmware_self_tests_cover_math_contract():
         "slewTowards",
     ):
         assert behavior in source
+
+
+def test_motor_initialization_keeps_driver_disabled_until_outputs_are_zero():
+    source = MOTOR_SOURCE.read_text(encoding="utf-8")
+    init_start = source.index("void initializeMotorOutputsSafe")
+    enable_start = source.index("void enableMotorDriver")
+    init_body = source[init_start:enable_start]
+    assert init_body.index("digitalWrite(MOTOR_STBY_PIN, LOW)") < init_body.index("ledcAttach")
+    assert init_body.index("ledcAttach") < init_body.rindex("ledcWrite")
+    assert "digitalWrite(MOTOR_STBY_PIN, HIGH)" not in init_body
+    assert "digitalWrite(MOTOR_STBY_PIN, HIGH)" in source[enable_start:]
+
+
+def test_motor_direction_change_zeros_pwm_before_deadtime_and_pin_change():
+    source = MOTOR_SOURCE.read_text(encoding="utf-8")
+    start = source.index("void writeMotorPwm")
+    end = source.index("void stopAllMotorsImmediate", start)
+    body = source[start:end]
+    assert body.index("ledcWrite") < body.index("delayMicroseconds")
+    assert body.index("delayMicroseconds") < body.index("digitalWrite")
+    assert "constrain" in body
+
+
+def test_encoder_isrs_only_read_direction_and_update_one_count():
+    source = MOTOR_SOURCE.read_text(encoding="utf-8")
+    for name in ("onEncoderA0", "onEncoderA1", "onEncoderA2"):
+        start = source.index(f"void IRAM_ATTR {name}")
+        body = source[start : source.index("}", start) + 1]
+        assert "digitalRead" in body
+        assert "encoderCounts" in body
+        assert "Serial" not in body
+        assert "float" not in body
+    assert "attachInterrupt" in source
+    assert "RISING" in source
+
+
+def test_encoder_snapshot_is_atomic_and_speed_filter_rejects_derived_jumps():
+    source = MOTOR_SOURCE.read_text(encoding="utf-8")
+    assert "noInterrupts()" in source
+    assert "interrupts()" in source
+    assert "encoderDeltaLimitCounts" in source
+    assert "SPEED_FILTER_ALPHA" in source
+    header = MOTOR_HEADER.read_text(encoding="utf-8")
+    for api in (
+        "initializeMotorOutputsSafe",
+        "enableMotorDriver",
+        "disableMotorDriver",
+        "writeMotorPwm",
+        "stopAllMotorsImmediate",
+        "attachEncoderInterrupts",
+        "snapshotEncoderCounts",
+        "updateMeasuredWheelSpeed",
+        "zeroEncoderReference",
+    ):
+        assert api in header
+
+
+def test_math_headers_compile_alongside_arduino_and_legacy_sketch_during_migration():
+    config = _config_text()
+    math_header = (FIRMWARE / "odometry_math.h").read_text(encoding="utf-8")
+    assert not re.search(r"constexpr\s+float\s+PI\b", config)
+    assert "canStartDistanceGoal" in math_header
+    assert "distanceGoalReached" in math_header
+
+
+def test_new_encoder_snapshot_has_weak_transition_symbol_until_sketch_replacement():
+    source = MOTOR_SOURCE.read_text(encoding="utf-8")
+    assert "void __attribute__((weak)) snapshotEncoderCounts" in source

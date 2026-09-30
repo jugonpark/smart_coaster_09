@@ -21,7 +21,7 @@ constexpr float ENCODER_COUNTS_PER_REV = 898.0f;
 constexpr bool MOTOR_REVERSED[MOTOR_COUNT] = {false, false, false};
 constexpr bool ENCODER_REVERSED[MOTOR_COUNT] = {false, false, false};
 
-constexpr float PI = 3.14159265358979323846f;
+constexpr float MATH_PI = 3.14159265358979323846f;
 constexpr float WHEEL_RADIUS_CM = 2.9f;
 constexpr float ROBOT_RADIUS_CM = 9.0f;
 constexpr float WHEEL_ANGLE_DEG[MOTOR_COUNT] = {0.0f, 120.0f, 240.0f};
@@ -93,4 +93,3 @@ constexpr bool ENABLE_LEGACY_PROTOCOL = true;
 constexpr uint32_t LEGACY_SESSION_ID = 0x4C454741U;
 
 }  // namespace robot_config
-
