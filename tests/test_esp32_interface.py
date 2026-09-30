@@ -27,9 +27,11 @@ class Esp32InterfaceTests(unittest.TestCase):
         try:
             sender.send(12.3, -4.5, 0.35, "RUN", force=True)
             wire = json.loads(receiver.recvfrom(4096)[0])
-            self.assertEqual(set(wire), {"seq", "t", "vx", "vy", "w", "status"})
+            self.assertEqual(set(wire), {"type", "session_id", "seq", "vx", "vy", "w", "status"})
+            self.assertEqual(wire["type"], "cmd_vel")
             self.assertEqual((wire["vx"], wire["vy"], wire["w"], wire["status"]),
                              (12.3, -4.5, 0.35, "RUN"))
+            self.assertGreater(wire["session_id"], 0)
             self.assertGreaterEqual(wire["seq"], 0)
         finally:
             sender.close()

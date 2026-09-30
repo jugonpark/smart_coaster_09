@@ -23,13 +23,23 @@ class Esp32UdpToolTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tool = load_tool()
 
-    def test_command_matches_legacy_velocity_protocol(self):
-        packet = self.tool.build_command(7, 12.5, 10.0, 0.0, 0.0, "RUN")
-        self.assertEqual(set(packet), {"seq", "t", "vx", "vy", "w", "status"})
+    def test_command_matches_typed_velocity_protocol(self):
+        packet = self.tool.build_command(123, 7, 10.0, 0.0, 0.0, "RUN")
+        self.assertEqual(set(packet), {"type", "session_id", "seq", "vx", "vy", "w", "status"})
         self.assertEqual(packet,
-                         {"seq": 7, "t": 12.5, "vx": 10.0, "vy": 0.0,
+                         {"type": "cmd_vel", "session_id": 123, "seq": 7,
+                          "vx": 10.0, "vy": 0.0,
                           "w": 0.0, "status": "RUN"})
         self.assertNotIn("motion_id", json.dumps(packet))
+
+    def test_stop_packet_is_minimal_and_session_is_stable(self):
+        test = self.tool.VelocityTest.__new__(self.tool.VelocityTest)
+        test.session_id = 77
+        test.seq = 0
+        first = self.tool.build_command(test.session_id, 1, 0, 0, 0, "STOP")
+        second = self.tool.build_command(test.session_id, 2, 1, 0, 0, "RUN")
+        self.assertEqual(first, {"type": "stop", "session_id": 77, "seq": 1})
+        self.assertEqual(second["session_id"], 77)
 
     def test_expected_targets_match_firmware_inverse_kinematics(self):
         targets = self.tool.expected_wheel_targets(10.0, 0.0, 0.0)

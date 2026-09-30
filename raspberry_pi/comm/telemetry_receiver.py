@@ -16,10 +16,15 @@ class TelemetryState:
     age_s: float | None = None
     seq: int = -1
     status: str = "UNKNOWN"
+    mode: str = "UNKNOWN"
+    state: str = "UNKNOWN"
+    fault: str = "NONE"
+    session_id: int | None = None
     encoder_counts: list[int] = field(default_factory=lambda: [0, 0, 0])
     rpm: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     wheel_speed_cm_s: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     target_speed_cm_s: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    wheel_pwm: list[int] | None = None
     rssi: int | None = None
     boot_id: int | None = None
     motion_id: int | None = None
@@ -29,6 +34,88 @@ class TelemetryState:
     target_distance_cm: float | None = None
     lateral_error_cm: float | None = None
     action_dtheta_rad: float | None = None
+
+
+def _finite_array(payload: dict, typed: str, legacy: str | None = None) -> list[float]:
+    values = payload.get(typed)
+    if values is None and legacy is not None:
+        values = payload.get(legacy)
+    if not isinstance(values, list) or len(values) != 3:
+        raise ValueError(f"{typed} must have three entries")
+    if not all(type(value) in (int, float) and math.isfinite(value) for value in values):
+        raise ValueError(f"{typed} contains a non-finite value")
+    return [float(value) for value in values]
+
+
+def parse_telemetry(payload: dict) -> TelemetryState:
+    if not isinstance(payload, dict) or payload.get("type") != "telemetry":
+        raise ValueError("unexpected telemetry payload")
+    counts = _finite_array(payload, "encoder_count", "counts")
+    speeds = _finite_array(payload, "wheel_speed")
+    targets = _finite_array(payload, "wheel_target", "target_speed")
+    if payload.get("rpm") is None:
+        rpm = [speed * 60.0 / (2.0 * math.pi * 2.9) for speed in speeds]
+    else:
+        rpm = _finite_array(payload, "rpm")
+    pwm = payload.get("wheel_pwm", payload.get("pwm"))
+    if pwm is not None and (
+        not isinstance(pwm, list) or len(pwm) != 3 or
+        not all(type(value) is int and -255 <= value <= 255 for value in pwm)
+    ):
+        raise ValueError("wheel_pwm must contain three signed integers")
+
+    for key in ("boot_id", "session_id", "motion_id"):
+        value = payload.get(key)
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"invalid {key}")
+    numeric_aliases = {
+        "goal_progress_cm": "goal_progress_cm",
+        "target_distance_cm": "goal_target_cm",
+        "lateral_error_cm": "lateral_error_cm",
+        "action_dtheta_rad": "odom_dtheta_rad",
+    }
+    optional: dict[str, float | None] = {}
+    for destination, source in numeric_aliases.items():
+        value = payload.get(source, payload.get(destination))
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+            raise ValueError(f"invalid {source}")
+        optional[destination] = None if value is None else float(value)
+
+    state = str(payload.get("state", payload.get("status", "UNKNOWN")))
+    status = ("RUN" if state in {"VELOCITY", "DISTANCE_ACTIVE", "DISTANCE_BRAKING"}
+              else "STOP") if "state" in payload else str(payload.get("status", "UNKNOWN"))
+    seq = payload.get("last_seq", payload.get("seq", -1))
+    if type(seq) is not int:
+        raise ValueError("invalid sequence")
+    goal_active = state in {"DISTANCE_ACTIVE", "DISTANCE_BRAKING"}
+    goal_reached = state == "GOAL_REACHED"
+    if "goal_active" in payload:
+        if type(payload["goal_active"]) is not bool:
+            raise ValueError("invalid goal_active")
+        goal_active = payload["goal_active"]
+    if "goal_reached" in payload:
+        if type(payload["goal_reached"]) is not bool:
+            raise ValueError("invalid goal_reached")
+        goal_reached = payload["goal_reached"]
+
+    rssi = payload.get("wifi_rssi", payload.get("rssi"))
+    if rssi is not None and (type(rssi) not in (int, float) or not math.isfinite(rssi)):
+        raise ValueError("invalid RSSI")
+    return TelemetryState(
+        received=True, seq=seq, status=status,
+        mode=str(payload.get("mode", "UNKNOWN")), state=state,
+        fault=str(payload.get("fault", "NONE")),
+        session_id=payload.get("session_id"),
+        encoder_counts=[int(value) for value in counts], rpm=rpm,
+        wheel_speed_cm_s=speeds, target_speed_cm_s=targets,
+        wheel_pwm=None if pwm is None else list(pwm), rssi=rssi,
+        boot_id=payload.get("boot_id"), motion_id=payload.get("motion_id"),
+        goal_active=goal_active, goal_reached=goal_reached,
+        goal_progress_cm=optional["goal_progress_cm"],
+        target_distance_cm=optional["target_distance_cm"],
+        lateral_error_cm=optional["lateral_error_cm"],
+        action_dtheta_rad=optional["action_dtheta_rad"],
+    )
 
 
 class TelemetryReceiver:
@@ -48,61 +135,26 @@ class TelemetryReceiver:
         while self._running:
             try:
                 raw, _ = self._sock.recvfrom(8192)
-                d = json.loads(raw.decode("utf-8"))
-                if not isinstance(d, dict) or d.get("type") != "telemetry":
-                    raise ValueError("unexpected telemetry payload")
-                arrays = [d.get(key) for key in ("counts", "rpm", "wheel_speed", "target_speed")]
-                if any(not isinstance(values, list) or len(values) != 3 for values in arrays):
-                    raise ValueError("telemetry wheel arrays must have three entries")
-                if not all(isinstance(v, (int, float)) and math.isfinite(v)
-                           for values in arrays for v in values):
-                    raise ValueError("non-finite telemetry value")
-                for key in ("boot_id", "motion_id"):
-                    value = d.get(key)
-                    if value is not None and (type(value) is not int or value < 0):
-                        raise ValueError(f"invalid {key}")
-                for key in ("goal_active", "goal_reached"):
-                    if key in d and type(d[key]) is not bool:
-                        raise ValueError(f"invalid {key}")
-                for key in ("goal_progress_cm", "target_distance_cm",
-                            "lateral_error_cm", "action_dtheta_rad"):
-                    value = d.get(key)
-                    if value is not None and (type(value) not in (int, float) or
-                                              not math.isfinite(value)):
-                        raise ValueError(f"invalid {key}")
-                t = TelemetryState(
-                    received=True,
-                    seq=int(d.get("seq", -1)),
-                    status=str(d.get("status", "UNKNOWN")),
-                    encoder_counts=[int(x) for x in d.get("counts", [0,0,0])],
-                    rpm=[float(x) for x in d.get("rpm", [0,0,0])],
-                    wheel_speed_cm_s=[float(x) for x in d.get("wheel_speed", [0,0,0])],
-                    target_speed_cm_s=[float(x) for x in d.get("target_speed", [0,0,0])],
-                    rssi=d.get("rssi"),
-                    boot_id=d.get("boot_id"), motion_id=d.get("motion_id"),
-                    goal_active=d.get("goal_active", False),
-                    goal_reached=d.get("goal_reached", False),
-                    goal_progress_cm=d.get("goal_progress_cm"),
-                    target_distance_cm=d.get("target_distance_cm"),
-                    lateral_error_cm=d.get("lateral_error_cm"),
-                    action_dtheta_rad=d.get("action_dtheta_rad"),
-                )
+                state = parse_telemetry(json.loads(raw.decode("utf-8")))
                 with self._lock:
-                    self._latest = t
+                    self._latest = state
                     self._last_rx = time.time()
             except socket.timeout:
                 continue
-            except (OSError, ValueError, TypeError, OverflowError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError,
+                    TypeError, OverflowError) as exc:
                 if self._running:
                     print(f"[TEL] rejected packet: {exc}")
-                continue
 
     def latest(self) -> TelemetryState:
         with self._lock:
-            x = TelemetryState(**{k: getattr(self._latest, k) for k in self._latest.__dataclass_fields__})
+            state = TelemetryState(**{
+                key: getattr(self._latest, key)
+                for key in self._latest.__dataclass_fields__
+            })
             if self._last_rx:
-                x.age_s = time.time() - self._last_rx
-            return x
+                state.age_s = time.time() - self._last_rx
+            return state
 
     def close(self) -> None:
         self._running = False

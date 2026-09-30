@@ -83,7 +83,7 @@ class MotionGoalTests(unittest.TestCase):
         self.assertIsNone(goals.select(run, plan, canceled, 1))
         self.assertEqual(goals.select(run, plan, canceled, 2), (22, 30))
 
-    def test_legacy_wire_fields_unchanged_and_optional_goal(self):
+    def test_typed_stop_and_distance_wire_semantics_are_separate(self):
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rx.bind(("127.0.0.1", 0))
         rx.settimeout(1)
@@ -91,10 +91,11 @@ class MotionGoalTests(unittest.TestCase):
         try:
             tx.send(0, 0, 0, "STOP", force=True)
             self.assertEqual(set(json.loads(rx.recv(4096))),
-                             {"seq", "t", "vx", "vy", "w", "status"})
+                             {"type", "session_id", "seq"})
             tx.send(-15, 0, 0, "SLOW", force=True,
                     motion_id=17, target_distance_cm=15)
             packet = json.loads(rx.recv(4096))
+            self.assertEqual(packet["type"], "cmd_move")
             self.assertEqual((packet["motion_id"], packet["target_distance_cm"]), (17, 15))
         finally:
             tx.close()

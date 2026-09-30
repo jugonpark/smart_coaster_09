@@ -69,8 +69,17 @@ class TransportTests(unittest.TestCase):
             for status, vx in (("STOP", 0), ("RUN", 12.3), ("SLOW", 4.5)):
                 sender.send(vx, 0, 0, status, force=True)
                 payload = json.loads(receiver.recvfrom(4096)[0])
-                self.assertEqual(set(payload), {"seq", "t", "vx", "vy", "w", "status"})
-                self.assertEqual((payload["status"], payload["vx"]), (status, vx))
+                if status == "STOP":
+                    self.assertEqual(set(payload), {"type", "session_id", "seq"})
+                    self.assertEqual(payload["type"], "stop")
+                else:
+                    self.assertEqual(set(payload), {"type", "session_id", "seq", "vx", "vy", "w", "status"})
+                    self.assertEqual((payload["type"], payload["status"], payload["vx"]),
+                                     ("cmd_vel", status, vx))
+            sender.send_heartbeat(force=True)
+            heartbeat = json.loads(receiver.recvfrom(4096)[0])
+            self.assertEqual(set(heartbeat), {"type", "session_id", "seq"})
+            self.assertEqual(heartbeat["type"], "heartbeat")
         finally:
             sender.close()
             receiver.close()

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Safely exercise the ESP32 legacy velocity-control UDP path from Windows.
+"""Safely exercise the ESP32 typed velocity-control UDP path from Windows.
 
 Example (raise all wheels before running):
     python tools/esp32_udp_test.py --ip 192.168.0.50
 
-The script sends only the six legacy velocity fields. It deliberately does not
-send motion_id or target_distance_cm, so ESP32 distance control is not engaged.
+The script sends ``cmd_vel`` plus repeated typed ``stop`` packets. It does not
+send ``cmd_move``, so ESP32 distance control is not engaged.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import argparse
 import ipaddress
 import json
 import math
+import secrets
 import socket
 import sys
 import time
@@ -24,9 +25,9 @@ TELEMETRY_PORT = 8889
 INITIAL_STOP_SECONDS = 1.0
 FINAL_STOP_SECONDS = 1.0
 DISPLAY_INTERVAL_SECONDS = 0.2
-MAX_LINEAR_CM_S = 50.0
-MAX_ANGULAR_RAD_S = 3.0
-MAX_WHEEL_CM_S = 60.0
+MAX_LINEAR_CM_S = 15.0
+MAX_ANGULAR_RAD_S = 1.0
+MAX_WHEEL_CM_S = 20.0
 ROBOT_RADIUS_CM = 9.0
 WHEEL_ANGLES_DEG = (0.0, 120.0, 240.0)
 
@@ -60,18 +61,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.rate < 10 or args.rate > 100:
         parser.error("--rate must be between 10 and 100 Hz")
     if math.hypot(args.vx, args.vy) > MAX_LINEAR_CM_S:
-        parser.error("linear speed exceeds firmware limit (50 cm/s)")
+        parser.error("linear speed exceeds firmware limit (15 cm/s)")
     if abs(args.w) > MAX_ANGULAR_RAD_S:
-        parser.error("angular speed exceeds firmware limit (3 rad/s)")
+        parser.error("angular speed exceeds firmware limit (1 rad/s)")
     return args
 
 
-def build_command(seq: int, sent_at: float, vx: float, vy: float, w: float,
+def build_command(session_id: int, seq: int, vx: float, vy: float, w: float,
                   status: str) -> dict[str, int | float | str]:
+    if type(session_id) is not int or session_id <= 0:
+        raise ValueError("session_id must be a nonzero integer")
     if status not in ("RUN", "SLOW", "STOP"):
         raise ValueError("invalid command status")
-    return {"seq": seq, "t": sent_at, "vx": vx, "vy": vy, "w": w,
-            "status": status}
+    base: dict[str, int | float | str] = {
+        "type": "stop" if status == "STOP" else "cmd_vel",
+        "session_id": session_id,
+        "seq": seq,
+    }
+    if status != "STOP":
+        base.update({"vx": vx, "vy": vy, "w": w, "status": status})
+    return base
 
 
 def expected_wheel_targets(vx: float, vy: float, w: float) -> tuple[float, ...]:
@@ -90,23 +99,49 @@ def expected_wheel_targets(vx: float, vy: float, w: float) -> tuple[float, ...]:
 def validate_telemetry(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("type") != "telemetry":
         raise ValueError("unexpected telemetry payload")
-    if not isinstance(payload.get("status"), str) or not isinstance(payload.get("mode"), str):
+    state = payload.get("state")
+    status = ("RUN" if state in {"VELOCITY", "DISTANCE_ACTIVE", "DISTANCE_BRAKING"}
+              else "STOP") if isinstance(state, str) else payload.get("status")
+    if not isinstance(status, str) or not isinstance(payload.get("mode"), str):
         raise ValueError("telemetry status/mode missing")
-    if type(payload.get("seq")) is not int:
+    seq = payload.get("last_seq", payload.get("seq"))
+    if type(seq) is not int:
         raise ValueError("telemetry seq must be an integer")
-    for key in ("counts", "rpm", "wheel_speed", "target_speed"):
-        values = payload.get(key)
+    normalized = dict(payload)
+    normalized["seq"] = seq
+    normalized["status"] = status
+    aliases = {
+        "counts": "encoder_count",
+        "wheel_speed": "wheel_speed",
+        "target_speed": "wheel_target",
+    }
+    for key, typed_key in aliases.items():
+        values = payload.get(typed_key, payload.get(key))
         if not isinstance(values, list) or len(values) != 3:
             raise ValueError(f"{key} must contain three values")
         if not all(type(value) in (int, float) and math.isfinite(value) for value in values):
             raise ValueError(f"{key} contains a non-finite value")
-    return payload
+        normalized[key] = values
+    rpm = payload.get("rpm")
+    if not isinstance(rpm, list) or len(rpm) != 3 or not all(
+            type(value) in (int, float) and math.isfinite(value) for value in rpm):
+        raise ValueError("rpm must contain three finite values")
+    normalized["rpm"] = rpm
+    pwm = payload.get("wheel_pwm", payload.get("pwm"))
+    if pwm is not None:
+        if not isinstance(pwm, list) or len(pwm) != 3 or not all(
+                type(value) is int and -255 <= value <= 255 for value in pwm):
+            raise ValueError("pwm must contain three signed integers")
+        normalized["pwm"] = pwm
+    return normalized
 
 
 def format_telemetry(payload: dict[str, Any]) -> str:
     lines = ["-" * 64,
              f"status : {payload['status']}",
              f"mode   : {payload['mode']}",
+             f"state  : {payload.get('state', '--')}",
+             f"fault  : {payload.get('fault', '--')}",
              f"seq    : {payload['seq']}",
              f"counts : {payload['counts']}"]
     for index in range(3):
@@ -123,6 +158,7 @@ class VelocityTest:
         self.target = (ip, COMMAND_PORT)
         self.ip = ip
         self.period = 1.0 / rate
+        self.session_id = secrets.randbits(32) or 1
         self.seq = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", TELEMETRY_PORT))
@@ -135,7 +171,7 @@ class VelocityTest:
 
     def send(self, vx: float, vy: float, w: float, status: str) -> None:
         self.seq += 1
-        packet = build_command(self.seq, time.time(), vx, vy, w, status)
+        packet = build_command(self.session_id, self.seq, vx, vy, w, status)
         wire = json.dumps(packet, separators=(",", ":"), allow_nan=False).encode("utf-8")
         self.sock.sendto(wire, self.target)
 

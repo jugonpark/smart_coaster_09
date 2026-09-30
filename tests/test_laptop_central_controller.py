@@ -64,9 +64,25 @@ class LaptopCentralControllerTests(unittest.TestCase):
         sequence = self.module.CommandSequence()
         first = sequence.packet(1.5, 10, 0, 0, "RUN")
         second = sequence.packet(1.6, 0, 0, 0, "STOP")
-        self.assertEqual(set(first), {"seq", "t", "vx", "vy", "w", "status"})
+        self.assertEqual(set(first), {"type", "session_id", "seq", "vx", "vy", "w", "status"})
+        self.assertEqual(first["type"], "cmd_vel")
+        self.assertEqual(set(second), {"type", "session_id", "seq"})
+        self.assertEqual(second["type"], "stop")
         self.assertEqual((first["seq"], second["seq"]), (1, 2))
+        self.assertGreater(first["session_id"], 0)
+        self.assertEqual(first["session_id"], second["session_id"])
         self.assertNotIn("motion_id", json.dumps(first))
+
+    def test_command_sequence_builds_heartbeat_and_separate_distance_command(self):
+        sequence = self.module.CommandSequence()
+        heartbeat = sequence.heartbeat()
+        move = sequence.move(10, 0, 0, "SLOW", motion_id=7,
+                             target_distance_cm=30)
+        self.assertEqual(set(heartbeat), {"type", "session_id", "seq"})
+        self.assertEqual(heartbeat["type"], "heartbeat")
+        self.assertEqual(move["type"], "cmd_move")
+        self.assertEqual((move["motion_id"], move["target_distance_cm"]), (7, 30.0))
+        self.assertEqual(heartbeat["session_id"], move["session_id"])
 
     def test_stop_packet_and_disconnected_run_block(self):
         control = self.module.ManualControl()
@@ -143,6 +159,21 @@ class LaptopCentralControllerTests(unittest.TestCase):
         self.assertEqual(legacy.pwm, (None, None, None))
         with self.assertRaises(ValueError):
             self.module.validate_telemetry(telemetry(pwm=[0, 300, 0]))
+
+    def test_typed_telemetry_names_take_precedence_over_legacy_aliases(self):
+        payload = telemetry(pwm=[1, 2, 3])
+        payload.update({
+            "last_seq": 44, "uptime_ms": 900, "state": "VELOCITY",
+            "fault": "NONE", "wifi_rssi": -50,
+            "encoder_count": [10, 20, 30], "wheel_target": [1, 2, 3],
+            "wheel_pwm": [-1, -2, -3],
+        })
+        state = self.module.validate_telemetry(payload)
+        self.assertEqual((state.seq, state.ms, state.status), (44, 900, "RUN"))
+        self.assertEqual(state.counts, (10, 20, 30))
+        self.assertEqual(state.target_speed, (1.0, 2.0, 3.0))
+        self.assertEqual(state.pwm, (-1, -2, -3))
+        self.assertEqual((state.state, state.fault), ("VELOCITY", "NONE"))
 
     def test_wheel_speed_error_and_tracking_status(self):
         self.assertAlmostEqual(8.66 - 8.10, 0.56)
@@ -256,7 +287,7 @@ class LaptopCentralControllerTests(unittest.TestCase):
         self.assertEqual(self.module.STATUS_LABEL_KO["STOP"], "정지 (STOP)")
         self.assertEqual(self.module.MODE_LABEL_KO["NETWORK"], "네트워크 (NETWORK)")
         packet = self.module.CommandSequence().packet(1.0, 0, 0, 0, "STOP")
-        self.assertEqual(packet["status"], "STOP")
+        self.assertEqual(packet["type"], "stop")
 
     def test_firmware_uses_dhcp_without_changing_udp_safety_contract(self):
         source = FIRMWARE.read_text(encoding="utf-8")
@@ -368,7 +399,8 @@ class LaptopCentralControllerTests(unittest.TestCase):
                 except socket.timeout:
                     break
             self.assertGreaterEqual(len(packets), 3)
-            self.assertTrue(all(packet["status"] == "STOP" for packet in packets))
+            self.assertTrue(all(packet["type"] == "stop" for packet in packets))
+            self.assertEqual(len({packet["session_id"] for packet in packets}), 1)
             self.assertEqual([packet["seq"] for packet in packets],
                              sorted({packet["seq"] for packet in packets}))
         finally:
