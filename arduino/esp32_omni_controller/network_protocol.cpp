@@ -166,6 +166,24 @@ bool violatesAbsoluteLimits(const NormalizedCommand &command) {
             command.targetDistanceCm > MAX_GOAL_DISTANCE_CM);
 }
 
+bool validNormalizedCommand(const NormalizedCommand &command) {
+    if (command.sessionId == 0) {
+        return false;
+    }
+    if (command.type != CommandType::VELOCITY && command.type != CommandType::MOVE) {
+        return true;
+    }
+    if (!isfinite(command.vxCmS) || !isfinite(command.vyCmS) ||
+        !isfinite(command.wRadS) || command.status == CommandStatus::STOP) {
+        return false;
+    }
+    if (command.type == CommandType::MOVE) {
+        return command.motionId >= 0 && isfinite(command.targetDistanceCm) &&
+               command.targetDistanceCm > 0.0f;
+    }
+    return true;
+}
+
 }  // namespace
 
 DecodeResult decodePacket(const char *data, size_t length, uint32_t receivedAtMs) {
@@ -192,7 +210,7 @@ DecodeResult decodePacket(const char *data, size_t length, uint32_t receivedAtMs
 AcceptanceResult acceptCommand(const NormalizedCommand &command,
                                CommandAcceptanceState &state,
                                CommandMailbox &mailbox) {
-    if (command.sessionId == 0) {
+    if (!validNormalizedCommand(command)) {
         return AcceptanceResult::FAULT_INVALID_COMMAND;
     }
 
@@ -213,7 +231,12 @@ AcceptanceResult acceptCommand(const NormalizedCommand &command,
         // Duplicate/stale classification deliberately occurs only here,
         // after decode has produced a complete NormalizedCommand.
         if (state.hasSequence && command.seq <= state.lastSequence) {
-            return AcceptanceResult::IGNORE_DUPLICATE_OR_STALE;
+            const bool legacyResyncStop =
+                command.legacy && command.sessionId == LEGACY_SESSION_ID &&
+                !state.moving && command.type == CommandType::STOP;
+            if (!legacyResyncStop) {
+                return AcceptanceResult::IGNORE_DUPLICATE_OR_STALE;
+            }
         }
         state.lastSequence = command.seq;
         state.hasSequence = true;

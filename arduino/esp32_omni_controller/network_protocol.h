@@ -86,4 +86,3 @@ AcceptanceResult acceptCommand(const NormalizedCommand &command,
 bool takeLatestMotion(const CommandMailbox &mailbox, uint32_t &lastTakenRevision,
                       NormalizedCommand &commandOut);
 void clearMotionMailbox(CommandMailbox &mailbox);
-

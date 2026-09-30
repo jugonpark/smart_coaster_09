@@ -26,7 +26,8 @@ serialization, and Wi-Fi reconnect are outside the control tick.
 
 Command port is UDP 8888. Every controller process creates one random nonzero 32-bit
 `session_id`; `seq` strictly increases within it. Decode completes before acceptance classifies
-duplicate/stale packets. Duplicate/stale commands are ignored. A session change during movement
+duplicate/stale packets. Duplicate/stale commands are ignored. A stopped legacy sender may use a
+low-sequence STOP to establish a new sequence epoch after restart. A session change during movement
 immediately stops and needs a later STOP or heartbeat before retrying motion.
 
 ```json
@@ -80,6 +81,8 @@ slew and call the physical PWM-zero write first.
 
 NETWORK moving states use a 300ms accepted command/heartbeat watchdog. MANUAL_TEST ignores Wi-Fi
 and uses a 3000ms serial command watchdog. Wi-Fi loss in NETWORK stops. Serial STOP always works.
+A latched fault cannot be replaced by a later recoverable fault, and serial motion remains
+inhibited until recovery completes.
 
 ## Telemetry
 
@@ -94,7 +97,8 @@ Telemetry port is UDP 8889 at 5Hz and targets the accepted controller address. T
 - odometry: `odom_dx_cm`, `odom_dy_cm`, `odom_dtheta_rad`
 - diagnostics: `wifi_rssi`, `control_overruns`
 
-Migration aliases `seq`, `status`, `counts`, `rpm`, `target_speed`, `pwm` remain. Inapplicable
+Migration aliases `seq`, `status`, `counts`, `rpm`, `target_speed`, `pwm`, `goal_active`,
+`goal_reached`, `target_distance_cm`, and `action_dtheta_rad` remain. Inapplicable
 goal values are null. Hosts prefer typed fields and fall back to aliases. Missing legacy PWM is
 shown as `--` and written as an empty CSV field.
 
@@ -104,8 +108,10 @@ shown as `--` and written as an empty CSV field.
 ignored; copy `secrets.example.h`. DHCP is used. Do not reuse an address from another subnet.
 
 Initial software limits are body 15cm/s, wheel 20cm/s, angular 1.0rad/s, SLOW 5cm/s. The wheel
-PID core preserves Kp 3.0, Ki 0.6, Kd 0.0, array state, P/I/D order, output saturation, and
-anti-windup. Tuning is not part of this redesign.
+PID core preserves Kp 2.6, Ki 1.3, Kd 0.0, array state, P/I/D order, output saturation, and
+anti-windup. Tuning is not part of this redesign. Feed-forward is used only through its calibrated
+15cm/s LUT; wheel targets from 15 to 20cm/s use PID feedback without LUT extrapolation. The Windows
+manual GUI is limited to body 15cm/s and angular 1.0rad/s.
 
 ## Verification boundary
 

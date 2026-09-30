@@ -149,4 +149,4 @@ def test_pid_core_preserves_arrays_gain_order_saturation_and_anti_windup():
     saturation_index = source.index("constrain(output", anti_windup_index)
     assert p_index < integral_index < derivative_index < output_index < anti_windup_index < saturation_index
     assert "PID_KP" in source and "PID_KI" in source and "PID_KD" in source
-    assert "-PID_INTEGRAL_LIMIT" in source and "PID_INTEGRAL_LIMIT" in source
+    assert "output = feedForward + p + PID_KI * pidIntegral[i] + d" in source

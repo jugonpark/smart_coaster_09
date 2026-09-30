@@ -65,10 +65,9 @@ constexpr int PWM_DEADZONE_POS[MOTOR_COUNT] = {0, 0, 0};
 constexpr int PWM_DEADZONE_NEG[MOTOR_COUNT] = {0, 0, 0};
 
 // Preserved wheel-speed PID core settings.
-constexpr float PID_KP = 3.0f;
-constexpr float PID_KI = 0.6f;
+constexpr float PID_KP = 2.6f;
+constexpr float PID_KI = 1.3f;
 constexpr float PID_KD = 0.0f;
-constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 constexpr bool ENABLE_FEED_FORWARD = true;
 constexpr uint8_t FF_POINT_COUNT = 7U;
 constexpr float FF_SPEED_CM_S[FF_POINT_COUNT] = {

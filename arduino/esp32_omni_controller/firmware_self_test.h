@@ -26,4 +26,3 @@ static_assert(approximately(brakingSpeedLimit(2, 9), 6, 0.001f) && brakingSpeedL
 static_assert(brakingSpeedLimit(2, 16) > brakingSpeedLimit(2, 4), "braking speed must increase with remaining distance");
 static_assert(approximately(slewTowards(0, 10, 20, 0.1f), 2), "positive slew is rate limited");
 static_assert(approximately(slewTowards(1, -10, 20, 0.1f), -1), "negative slew is rate limited through zero");
-

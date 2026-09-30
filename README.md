@@ -42,7 +42,7 @@ ESP32
 - ESP32: DHCP, typed UDP 8888, telemetry 8889, command watchdog 300ms
 - ESP32 geometry: wheel radius 2.9cm, robot radius 9.0cm, wheel angles 0/120/240 deg
 - Encoder: A-phase rising edge x1, measured starting value 898 counts/output-rev
-- PID preserved: Kp 3.0, Ki 0.6, Kd 0.0, control loop 100Hz
+- PID preserved: Kp 2.6, Ki 1.3, Kd 0.0, control loop 100Hz
 - Motion limits: body 15cm/s, wheel 20cm/s, angular 1.0rad/s
 - Pin source of truth: GitHub `06693c1`; see `robot_config.h`.
 

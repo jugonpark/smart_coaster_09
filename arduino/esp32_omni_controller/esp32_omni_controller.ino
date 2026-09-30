@@ -229,6 +229,16 @@ NormalizedCommand manualCommand(CommandType type) {
     return command;
 }
 
+bool manualActuationAllowed() {
+    if (safetyState.fault != FaultCode::NONE) {
+        stopAllMotorsImmediate();
+        Serial.printf("ERR fault=%s; reset fault before manual motion\n",
+                      faultCodeName(safetyState.fault));
+        return false;
+    }
+    return true;
+}
+
 void enterManualMode() {
     immediateStopNow(FaultCode::NONE, millis(), commandMailbox,
                      commandAcceptance);
@@ -283,6 +293,7 @@ void processSerialLine(char *line) {
                strcmp(commandName, "M3") == 0) {
         int pwm = 0;
         if (sscanf(line, "%*s %d", &pwm) == 1) {
+            if (!manualActuationAllowed()) return;
             enterManualMode();
             manualPwmActive = true;
             writeMotorPwm(static_cast<uint8_t>(commandName[1] - '1'), pwm);
@@ -291,6 +302,7 @@ void processSerialLine(char *line) {
     } else if (strcmp(commandName, "ALL") == 0) {
         int pwm[MOTOR_COUNT] = {};
         if (sscanf(line, "%*s %d %d %d", &pwm[0], &pwm[1], &pwm[2]) == 3) {
+            if (!manualActuationAllowed()) return;
             enterManualMode();
             manualPwmActive = true;
             for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
@@ -301,6 +313,7 @@ void processSerialLine(char *line) {
     } else if (strcmp(commandName, "VEL") == 0) {
         float vx = 0.0f, vy = 0.0f, w = 0.0f;
         if (sscanf(line, "%*s %f %f %f", &vx, &vy, &w) == 3) {
+            if (!manualActuationAllowed()) return;
             enterManualMode();
             NormalizedCommand velocity = manualCommand(CommandType::VELOCITY);
             velocity.vxCmS = vx;
@@ -314,6 +327,7 @@ void processSerialLine(char *line) {
         float vx = 0.0f, vy = 0.0f, w = 0.0f, distance = 0.0f;
         if (sscanf(line, "%*s %d %f %f %f %f", &motionId, &vx, &vy, &w,
                    &distance) == 5) {
+            if (!manualActuationAllowed()) return;
             enterManualMode();
             NormalizedCommand move = manualCommand(CommandType::MOVE);
             move.motionId = motionId;
@@ -365,9 +379,9 @@ void serviceUdpRxBudgeted() {
         ++udpReceived;
         const IPAddress remoteIp = commandUdp.remoteIP();
         if (packetSize > UDP_PACKET_MAX_BYTES) {
-            while (commandUdp.available() > 0) {
-                commandUdp.read();
-            }
+            // ESP32 WiFiUDP::flush releases the current RX packet without an
+            // unbounded byte-at-a-time loop inside the scheduler budget.
+            commandUdp.flush();
             ++udpRejected;
             raiseFault(FaultCode::BAD_PACKET, millis(), commandMailbox,
                        commandAcceptance);
@@ -463,6 +477,11 @@ void runControlTickIfDue() {
     if (updated == MotionUpdateResult::ODOMETRY_INVALID) {
         raiseFault(FaultCode::ODOMETRY_INVALID, nowMs, commandMailbox,
                    commandAcceptance);
+        return;
+    }
+    if (updated == MotionUpdateResult::OUTPUT_INHIBITED ||
+        updated == MotionUpdateResult::GOAL_COMPLETE) {
+        commandAcceptance.moving = false;
         return;
     }
 

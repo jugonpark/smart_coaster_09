@@ -27,6 +27,7 @@ enum class MotionApplyResult : uint8_t {
 enum class MotionUpdateResult : uint8_t {
     OK,
     GOAL_COMPLETE,
+    OUTPUT_INHIBITED,
     PATH_DEVIATION,
     ENCODER_INVALID,
     ODOMETRY_INVALID,
@@ -45,6 +46,9 @@ struct MotionControllerState {
     float goalUx = 0.0f;
     float goalUy = 0.0f;
     float goalCruiseCmS = 0.0f;
+    float goalRequestedSpeedCmS = 0.0f;
+    float goalRequestedWRadS = 0.0f;
+    CommandStatus goalRequestedStatus = CommandStatus::STOP;
     float goalTargetCm = 0.0f;
     float goalProgressCm = 0.0f;
     float lateralErrorCm = 0.0f;
@@ -73,4 +77,3 @@ void cancelMotionImmediate(MotionState finalState = MotionState::STOPPED);
 void resetMotionAfterFault();
 
 }  // namespace motion_control
-

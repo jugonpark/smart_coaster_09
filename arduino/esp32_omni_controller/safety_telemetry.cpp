@@ -100,6 +100,14 @@ void immediateStopNow(FaultCode cause, uint32_t nowMs,
 void raiseFault(FaultCode cause, uint32_t nowMs,
                 CommandMailbox &mailbox,
                 CommandAcceptanceState &acceptance) {
+    const bool preserveLatched =
+        safetyState.faultLatched && safetyState.fault != FaultCode::NONE;
+    const FaultCode preservedCause = preserveLatched ? safetyState.fault : cause;
+    const uint32_t preservedAtMs = preserveLatched ? safetyState.faultAtMs : nowMs;
+    if (preserveLatched) {
+        immediateStopNow(preservedCause, preservedAtMs, mailbox, acceptance);
+        return;
+    }
     safetyState.faultLatched = !isRecoverableFault(cause);
     safetyState.resetAuthorized = false;
     immediateStopNow(cause, nowMs, mailbox, acceptance);
@@ -216,6 +224,15 @@ void buildTelemetry(JsonDocument &document, uint32_t nowMs, uint32_t bootId,
     addFloatArray(root, "rpm", rpm);
     addFloatArray(root, "target_speed", targetWheelSpeed);
     addIntArray(root, "pwm", motorEncoderState.currentPwm);
+    root["goal_active"] = motionState.state == MotionState::DISTANCE_ACTIVE ||
+                          motionState.state == MotionState::DISTANCE_BRAKING;
+    root["goal_reached"] = motionState.state == MotionState::GOAL_REACHED;
+    if (motionState.goalContentValid) {
+        root["target_distance_cm"] = motionState.goalTargetCm;
+    } else {
+        root["target_distance_cm"] = nullptr;
+    }
+    root["action_dtheta_rad"] = motionState.odomDthetaRad;
 }
 
 bool sendTelemetry(WiFiUDP &udp, const IPAddress &controllerIp,

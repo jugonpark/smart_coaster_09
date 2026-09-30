@@ -18,10 +18,6 @@ float targetWheelSpeed[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f};
 
 namespace {
 
-bool nearlyEqual(float left, float right) {
-    return fabsf(left - right) <= MOTION_ID_FLOAT_TOLERANCE;
-}
-
 bool isDistanceState(MotionState state) {
     return state == MotionState::DISTANCE_ACTIVE ||
            state == MotionState::DISTANCE_BRAKING ||
@@ -33,6 +29,11 @@ float feedForwardPwm(uint8_t motorIndex, float targetSpeed) {
         return 0.0f;
     }
     const float speed = fabsf(targetSpeed);
+    // The LUT is not extrapolated. PID alone controls targets beyond the
+    // measured feed-forward calibration range.
+    if (speed > FF_SPEED_CM_S[FF_POINT_COUNT - 1]) {
+        return 0.0f;
+    }
     const float *table = targetSpeed >= 0.0f ? FF_PWM_POS[motorIndex] : FF_PWM_NEG[motorIndex];
     float pwm = table[FF_POINT_COUNT - 1];
     if (speed < FF_SPEED_CM_S[FF_POINT_COUNT - 1]) {
@@ -100,9 +101,11 @@ MotionApplyResult applyMotionCommand(const NormalizedCommand &command) {
     const float uy = command.vyCmS / directionMagnitude;
 
     if (motionState.goalContentValid && command.motionId == motionState.motionId) {
-        if (!nearlyEqual(ux, motionState.goalUx) ||
-            !nearlyEqual(uy, motionState.goalUy) ||
-            !nearlyEqual(command.targetDistanceCm, motionState.goalTargetCm)) {
+        if (ux != motionState.goalUx || uy != motionState.goalUy ||
+            directionMagnitude != motionState.goalRequestedSpeedCmS ||
+            command.wRadS != motionState.goalRequestedWRadS ||
+            command.status != motionState.goalRequestedStatus ||
+            command.targetDistanceCm != motionState.goalTargetCm) {
             return MotionApplyResult::MOTION_ID_CHANGED;
         }
         return motionState.state == MotionState::GOAL_REACHED
@@ -115,6 +118,9 @@ MotionApplyResult applyMotionCommand(const NormalizedCommand &command) {
     motionState.goalUx = ux;
     motionState.goalUy = uy;
     motionState.goalCruiseCmS = fminf(directionMagnitude, BODY_LINEAR_LIMIT_CM_S);
+    motionState.goalRequestedSpeedCmS = directionMagnitude;
+    motionState.goalRequestedWRadS = command.wRadS;
+    motionState.goalRequestedStatus = command.status;
     motionState.goalTargetCm = command.targetDistanceCm;
     motionState.goalProgressCm = 0.0f;
     motionState.lateralErrorCm = 0.0f;
@@ -170,10 +176,10 @@ MotionUpdateResult updateMotionState(const float wheelDeltaCm[MOTOR_COUNT],
     if (motionState.remainingCm < 0.0f) {
         motionState.overshootCm = -motionState.remainingCm;
         motionState.overshootStopped = true;
-        for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
-            targetWheelSpeed[i] = 0.0f;
-        }
-        stopAllMotorsImmediate();
+        cancelMotionImmediate(MotionState::STOPPED);
+        motionState.goalContentValid = true;
+        motionState.overshootStopped = true;
+        return MotionUpdateResult::OUTPUT_INHIBITED;
     }
 
     float maximumMeasuredSpeed = 0.0f;
@@ -281,15 +287,15 @@ void runWheelPid(float dtSec) {
 
         const float error = target - measuredWheelSpeed[i];
         const float p = PID_KP * error;
-        float candidateIntegral = pidIntegral[i] + error * dtSec;
-        candidateIntegral = constrain(candidateIntegral, -PID_INTEGRAL_LIMIT,
-                                      PID_INTEGRAL_LIMIT);
+        const float candidateIntegral = pidIntegral[i] + error * dtSec;
         const float iTerm = PID_KI * candidateIntegral;
         const float d = PID_KD * (error - pidPreviousError[i]) / dtSec;
         pidPreviousError[i] = error;
         float output = feedForward + p + iTerm + d;
         if (output > -PWM_MAX && output < PWM_MAX) {
             pidIntegral[i] = candidateIntegral;
+        } else {
+            output = feedForward + p + PID_KI * pidIntegral[i] + d;
         }
         output = constrain(output, -(float)PWM_MAX, (float)PWM_MAX);
 
