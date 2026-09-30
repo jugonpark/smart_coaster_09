@@ -146,10 +146,67 @@ def test_math_headers_compile_alongside_arduino_and_legacy_sketch_during_migrati
     config = _config_text()
     math_header = (FIRMWARE / "odometry_math.h").read_text(encoding="utf-8")
     assert not re.search(r"constexpr\s+float\s+PI\b", config)
-    assert "canStartDistanceGoal" in math_header
-    assert "distanceGoalReached" in math_header
+    assert "canStartDistanceGoal" not in math_header
+    assert "distanceGoalReached" not in math_header
 
 
-def test_new_encoder_snapshot_has_weak_transition_symbol_until_sketch_replacement():
+def test_encoder_snapshot_uses_single_strong_module_implementation():
     source = MOTOR_SOURCE.read_text(encoding="utf-8")
-    assert "void __attribute__((weak)) snapshotEncoderCounts" in source
+    assert "__attribute__((weak))" not in source
+
+
+def test_sketch_setup_and_loop_preserve_safe_bounded_service_order():
+    source = (FIRMWARE / "esp32_omni_controller.ino").read_text(encoding="utf-8")
+    setup_start = source.index("void setup()")
+    loop_start = source.index("void loop()")
+    setup = source[setup_start:loop_start]
+    loop = source[loop_start:]
+    ordered_setup = (
+        "Serial.begin",
+        "initializeMotorOutputsSafe",
+        "attachEncoderInterrupts",
+        "resetMotionAfterFault",
+        "beginWiFi",
+        "enableMotorDriver",
+    )
+    positions = [setup.index(token) for token in ordered_setup]
+    assert positions == sorted(positions)
+    first_control = loop.index("runControlTickIfDue")
+    udp = loop.index("serviceUdpRxBudgeted")
+    second_control = loop.index("runControlTickIfDue", first_control + 1)
+    telemetry = loop.index("runTelemetryIfDue")
+    assert first_control < udp < second_control < telemetry
+
+
+def test_udp_service_enforces_packet_and_time_budgets():
+    source = (FIRMWARE / "esp32_omni_controller.ino").read_text(encoding="utf-8")
+    start = source.index("void serviceUdpRxBudgeted")
+    end = source.index("void runControlTickIfDue", start)
+    body = source[start:end]
+    assert "UDP_PACKET_BUDGET" in body
+    assert "UDP_TIME_BUDGET_US" in body
+    assert "micros()" in body
+    assert "packetsHandled" in body
+    assert "decodePacket" in body
+    assert "handleAcceptedCommand(decoded.command" in body
+    acceptance_start = source.index("void handleAcceptedCommand")
+    acceptance_end = source.index("NormalizedCommand manualCommand", acceptance_start)
+    assert "acceptCommand" in source[acceptance_start:acceptance_end]
+
+
+def test_control_path_has_no_json_or_serial_output_and_manual_commands_are_complete():
+    source = (FIRMWARE / "esp32_omni_controller.ino").read_text(encoding="utf-8")
+    start = source.index("void runControlTickIfDue")
+    end = source.index("void runTelemetryIfDue", start)
+    body = source[start:end]
+    assert "Serial." not in body
+    assert "Json" not in body
+    for command in ("HELP", "STATUS", "PIN", "ENC", "ZERO", "AUTO", "MANUAL", "STOP", "M1", "M2", "M3", "ALL", "VEL", "MOVE"):
+        assert f'"{command}"' in source
+
+
+def test_sketch_uses_local_secrets_header_without_tracked_credentials():
+    source = (FIRMWARE / "esp32_omni_controller.ino").read_text(encoding="utf-8")
+    assert '#include "secrets.h"' in source
+    assert "__has_include" in source
+    assert not re.search(r'const\s+char\s*\*\s*WIFI_(?:SSID|PASS)\s*=\s*"(?!YOUR_)', source)

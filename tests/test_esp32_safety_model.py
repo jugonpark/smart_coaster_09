@@ -79,6 +79,17 @@ def test_latched_fault_requires_explicit_reset_and_handshake():
         assert can_clear(fault, True, True, True)
 
 
+def test_latched_reset_is_authorized_first_and_cleared_by_subsequent_handshake():
+    header = HEADER.read_text(encoding="utf-8")
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "resetAuthorized" in header
+    explicit = source.index("if (explicitReset")
+    authorize = source.index("resetAuthorized = true", explicit)
+    delayed_return = source.index("return false", authorize)
+    later_clear = source.index("safetyState.resetAuthorized", delayed_return)
+    assert explicit < authorize < delayed_return < later_clear
+
+
 def test_cpp_immediate_stop_writes_motor_zero_before_state_cleanup():
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index("void immediateStopNow")

@@ -119,7 +119,7 @@ void attachEncoderInterrupts() {
     attachInterrupt(digitalPinToInterrupt(ENCODER_A_PINS[2]), onEncoderA2, RISING);
 }
 
-void __attribute__((weak)) snapshotEncoderCounts(int32_t snapshot[MOTOR_COUNT]) {
+void snapshotEncoderCounts(int32_t snapshot[MOTOR_COUNT]) {
     noInterrupts();
     for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
         snapshot[i] = encoderCounts[i];
@@ -141,6 +141,7 @@ bool updateMeasuredWheelSpeed(float dtSec) {
 
     for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
         const int32_t delta = snapshot[i] - motorEncoderState.previousCount[i];
+        motorEncoderState.deltaCount[i] = delta;
         motorEncoderState.count[i] = snapshot[i];
         motorEncoderState.previousCount[i] = snapshot[i];
         const bool valid = llabs(static_cast<long long>(delta)) <= deltaLimit;
@@ -165,6 +166,7 @@ void zeroEncoderReference() {
     for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
         motorEncoderState.count[i] = snapshot[i];
         motorEncoderState.previousCount[i] = snapshot[i];
+        motorEncoderState.deltaCount[i] = 0;
         motorEncoderState.measuredWheelSpeed[i] = 0.0f;
         motorEncoderState.encoderValid[i] = true;
     }

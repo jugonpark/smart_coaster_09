@@ -104,13 +104,3 @@ constexpr float slewTowards(float current, float target, float ratePerSec,
     }
     return target;
 }
-
-// Transitional helpers used only by the legacy sketch until Task 6 replaces it.
-constexpr bool canStartDistanceGoal(bool armed, bool networkMode,
-                                    int32_t incomingId, int32_t previousId) {
-    return armed && networkMode && incomingId >= 0 && incomingId != previousId;
-}
-
-constexpr bool distanceGoalReached(float progress, float target, float tolerance) {
-    return progress >= target - tolerance;
-}

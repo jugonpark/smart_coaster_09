@@ -101,20 +101,28 @@ void raiseFault(FaultCode cause, uint32_t nowMs,
                 CommandMailbox &mailbox,
                 CommandAcceptanceState &acceptance) {
     safetyState.faultLatched = !isRecoverableFault(cause);
+    safetyState.resetAuthorized = false;
     immediateStopNow(cause, nowMs, mailbox, acceptance);
 }
 
 bool tryResetFault(bool conditionClear, bool explicitReset,
                    bool handshakeComplete) {
-    if (safetyState.fault == FaultCode::NONE || !conditionClear ||
-        !handshakeComplete) {
+    if (safetyState.fault == FaultCode::NONE || !conditionClear) {
         return false;
     }
-    if (!isRecoverableFault(safetyState.fault) && !explicitReset) {
+    if (explicitReset && safetyState.faultLatched) {
+        safetyState.resetAuthorized = true;
+        return false;
+    }
+    if (!handshakeComplete) {
+        return false;
+    }
+    if (safetyState.faultLatched && !safetyState.resetAuthorized) {
         return false;
     }
     safetyState.fault = FaultCode::NONE;
     safetyState.faultLatched = false;
+    safetyState.resetAuthorized = false;
     safetyState.faultAtMs = 0;
     resetMotionAfterFault();
     return true;

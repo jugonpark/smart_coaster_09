@@ -31,6 +31,7 @@ struct SafetyState {
     uint32_t faultAtMs = 0;
     uint32_t lastManualCommandMs = 0;
     bool faultLatched = false;
+    bool resetAuthorized = false;
 };
 
 extern SafetyState safetyState;
@@ -54,4 +55,3 @@ bool sendTelemetry(WiFiUDP &udp, const IPAddress &controllerIp,
                    uint16_t controllerPort, JsonDocument &document);
 const char *faultCodeName(FaultCode fault);
 const char *controllerModeName(ControllerMode mode);
-
