@@ -1,45 +1,66 @@
-# PROJECT C: ESP32 Motion Controller
+# ESP32 Motion Controller
 
-## 기존 경로와 타이밍
+펌웨어는 `esp32_omni_controller/` 아래의 고정 구조체와 함수 기반 모듈로 구성된다.
 
-Pi는 UDP 8888에 `{seq,t,vx,vy,w,status}`를 약 30 Hz로 보낸다. `vx/vy`는 robot frame cm/s, `w`는 rad/s이며 `status`는 `RUN`, `SLOW`, `STOP`이다. ESP32는 기존 3WD 역기구학 → 100 Hz encoder/PID → TB6612 PWM 경로를 유지한다. 약 200 ms마다 UDP 8889로 telemetry를 보낸다. `STATUS` serial 출력의 `control overruns (>20ms)`는 제어 루프 지연을 관찰하기 위한 누적 계수다.
-
-필수 필드가 없거나 숫자형이 아니거나 NaN/INF인 패킷, 잘못된 status, linear speed 50 cm/s 또는 angular speed 3 rad/s 초과, 지나치게 긴 패킷은 즉시 safe STOP으로 보낸다. 정상 `SLOW`는 기존 15 cm/s·1 rad/s 추가 상한을 적용한다. 동일하거나 작은 `seq`는 거부하며 STOP한다. Pi가 재시작하여 seq가 1로 돌아온 경우에는 마지막 유효 명령 이후 300 ms watchdog이 경과한 다음 새 `STOP` 패킷으로만 seq 기준을 재설정한다. Pi의 epoch `t`는 숫자·유한값 여부만 검증한다. ESP32의 `millis()`와 절대시각 비교는 하지 않는다. 인증이나 신뢰할 수 없는 네트워크에 대한 보호는 이번 범위 밖이다.
-
-STOP 명령, invalid packet, Wi-Fi 손실, 300 ms watchdog, 비정상 wheel 수치는 `stopAllMotors()` 경로로 모이며 wheel target·PID 상태·PWM을 0으로 한다. PWM 0일 때 두 방향 핀은 LOW인 coast 정지다. Wi-Fi 재연결 후 이전 속도 명령을 재사용하지 않는다. Serial `MANUAL_PWM`은 기존 벤치 시험 기능으로 남아 있지만 Wi-Fi 손실과 잘못된 UDP 명령은 이 모드도 정지시킨다.
-
-## Telemetry 계약
-
-Pi의 기존 receiver와 같은 JSON을 유지한다: `type="telemetry"`, `seq`, `ms`(ESP32 uptime), `status`, `rssi`, 길이 3의 `counts`, `rpm`, `wheel_speed`, `target_speed` 배열. 속도 단위는 cm/s다. 추가 `mode`는 `NETWORK` 또는 `MANUAL_PWM`으로 기존 receiver가 무시한다. 비유한 wheel 숫자는 0으로 대체하고 safe STOP한다. `status`는 watchdog 정지 시 STOP을 보고한다.
-
-UDP 진단은 기본 활성화되어 있다. 부팅 시 `[UDP] begin port=8888 result=OK|FAILED`를 출력하고, 유효 명령 또는 거부 패킷은 최대 1초에 한 번 `[UDP RX]`로 송신자와 사유를 출력한다. `STATUS`의 `UDP rx/accepted/rejected`와 `UDP last packet age ms`는 로그 제한과 무관한 누계/경과값이므로 패킷 미도착과 parser 거부를 구분할 때 사용한다. 진단은 수신·검증·STOP safety 흐름을 변경하지 않는다.
-
-개발/테스트 기본값은 `USE_STATIC_IP=false`이며 `WiFi.begin()`이 현재 공유기의 DHCP 주소를 받는다. 연결 직후 IP, gateway, subnet을 한 번 출력하고 `STATUS`에서도 현재 IP를 확인할 수 있다. 전용 공유기에서만 필요에 따라 static IP를 사용하며, 그 경우 저장된 `LOCAL_IP`, `GATEWAY`, `SUBNET`을 실제 공유기 대역에 맞춰야 한다.
-
-## 핀과 측정 전 가정
-
-| 항목 | GPIO 또는 값 |
+| 파일 | 책임 |
 |---|---|
-| TB6612 공통 STBY | 27 |
-| M1 IN1/IN2/PWM, ENC A/B | 19/18/25, 34/35 |
-| M2 IN1/IN2/PWM, ENC A/B | 21/22/26, 16/17 |
-| M3 IN1/IN2/PWM, ENC A/B | 23/13/14, 32/33 |
-| Wheel normal angle (robot +X 기준 CCW) | M1 0°, M2 120°, M3 240° |
-| Wheel radius / robot radius | 2.9 cm / 9.0 cm 초기값 |
-| Encoder count 초기 가정 | `RAW_ENCODER_PPR=11`, `GEAR_RATIO=74.83`, `QUADRATURE_MULTIPLIER=1` (A rising만 계수) |
-| PID 초기값 | Kp 2.6, Ki 1.3, Kd 0.0 (2.9 cm wheel의 RPM 기반 PI 값에서 환산한 벤치 시작값) |
+| `esp32_omni_controller.ino` | 안전한 setup, cooperative scheduler, bounded Serial/Wi-Fi/UDP service |
+| `robot_config.h` | 핀, 단위, geometry, limit, timing, PID/FF |
+| `motor_encoder.*` | TB6612 출력, 최소 ISR, count snapshot, 속도 계산 |
+| `network_protocol.*` | typed/legacy decode, normalized acceptance, latest-wins mailbox |
+| `kinematics_motion.*` | 상태, IK/FK, slew, odometry, distance braking, PID |
+| `safety_telemetry.*` | watchdog, fault/reset, 즉시 정지, typed telemetry와 migration aliases |
+| `odometry_math.h` | hardware-independent constexpr 수학 |
 
-`motorReversed`와 `encoderReversed`는 각 M1~M3에 개별 설정 가능하다. 현재 모두 false이며 실제 정방향 명령과 count 증가 방향은 미검증이다. M1~M3의 chassis 실제 위치·wheel 접선 방향, PPR/감속비, GPIO34/35의 외부 pull-up 유무를 측정해야 한다. TB6612 모듈 2개의 네 채널 중 쓰지 않는 한 채널의 IN/PWM을 LOW에 고정하는 배선도 확인한다. 소스는 그 채널의 핀을 할당하지 않는다. Wi-Fi SSID/password는 `CHANGE_ME` placeholder이며 실값을 저장소에 넣지 않는다. 고정 IP/gateway는 현장 네트워크와 Pi `GRISE_ESP32_IP`에 맞춰야 한다.
+상세 계약은 [ESP32 Motion Controller](../docs/ESP32_MOTION_CONTROLLER.md)와
+[Odometry & Distance Control](../docs/ODOMETRY_DISTANCE_CONTROL.md)에 있다.
 
-## 실제 장치 확인 순서
+## 빌드와 로컬 시크릿
 
-1. 실제 보드 FQBN을 확인하고 firmware를 빌드·flash한다. 빌드 성공은 flash나 주행 검증이 아니다.
-2. 모터를 바닥에서 띄우고 STOP, 제한된 RUN/SLOW, 각 wheel 방향과 encoder count 부호를 확인한다.
-3. wheel RPM/실측 속도/target 속도, 세 wheel 동시 제어, PID 잔류 출력과 STBY를 확인한다.
-4. Pi 종료, UDP 손실, Wi-Fi 단절, 잘못된 패킷에서 정지 시간과 재연결 후 새 명령 필요 조건을 측정한다.
-5. telemetry가 약 5 Hz로 Pi에 도착하고 Pi stale 판정이 작동하는지 확인한다.
+Arduino-ESP32 Core 3.3.12와 ArduinoJson 7.4.3 기준:
 
-PROJECT C는 odometry, 목표 거리 도달 STOP, PID 재튜닝을 포함하지 않는다.
-# PROJECT H distance goals
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32 arduino/esp32_omni_controller
+```
 
-Optional `motion_id` and `target_distance_cm` on RUN/SLOW activate encoder based distance control. The six original command fields remain required; packets without both optionals retain velocity mode. A valid STOP is required after ESP32 boot before a distance goal. See [Odometry & Distance Control](../docs/ODOMETRY_DISTANCE_CONTROL.md) for geometry, cancellation, telemetry, and calibration.
+`secrets.example.h`를 `secrets.h`로 복사하고 로컬 Wi-Fi 값을 입력한다.
+`secrets.h`는 Git에서 제외된다. 현재 연결은 DHCP만 사용한다.
+
+## 고정 하드웨어 계약
+
+| 장치 | IN1 | IN2 | PWM | ENC_A | ENC_B |
+|---|---:|---:|---:|---:|---:|
+| M1 | 19 | 18 | 25 | 34 | 35 |
+| M2 | 21 | 22 | 26 | 16 | 17 |
+| M3 | 23 | 13 | 14 | 32 | 33 |
+| STBY | 27 | | | | |
+
+M1 GPIO34/35에는 internal pull-up이 없다. 외부 pull-up과 실제 배선을 모터 시험 전에 확인한다.
+`motorReversed[]`와 `encoderReversed[]`는 독립 보정값이며 현재 모두 false다.
+
+초기 software 설정:
+
+- wheel radius 2.9cm, robot radius 9.0cm, wheel angle 0/120/240°
+- A-phase RISING x1, measured starting value 898 counts/output-rev
+- body 15cm/s, wheel 20cm/s, angular 1.0rad/s, SLOW 5cm/s
+- PID Kp 3.0, Ki 0.6, Kd 0.0
+- control 100Hz, telemetry 5Hz, command watchdog 300ms
+- UDP command 8888, telemetry 8889
+
+count/rev, motor/encoder polarity, wheel radius, PID/FF는 실물 확인 전 보정 확정값이 아니다.
+
+## Serial 명령
+
+`HELP`, `STATUS`, `PIN`, `ENC`, `ZERO`, `AUTO`, `MANUAL`, `STOP`,
+`M1/M2/M3`, `ALL`, `VEL`, `MOVE`를 지원한다. MANUAL_TEST는 Wi-Fi와 독립적이지만
+3초 동안 새 수동 명령이 없으면 즉시 정지한다. Serial `STOP`은 항상 작동한다.
+
+실물 연결 직후에는 `STATUS`로 DHCP IP와 UDP 상태만 확인한다. 모터 명령은 바퀴를 띄우고
+물리 시험 절차를 준비한 뒤 수행한다.
+
+## 안전 경계
+
+STOP, fault, Wi-Fi loss, watchdog, invalid packet은 mailbox와 slew limiter를 건너뛰고
+가장 먼저 PWM 0을 쓴다. 방향 전환은 PWM 0, deadtime, 방향 핀, duty 순이다.
+펌웨어 빌드와 host 테스트는 `SOFTWARE_VERIFIED` 근거이며 flash, 배선, 회전, 거리 정확도를
+검증하지 않는다.

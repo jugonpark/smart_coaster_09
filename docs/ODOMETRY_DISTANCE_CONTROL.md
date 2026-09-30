@@ -1,31 +1,81 @@
-# PROJECT H: Odometry & Distance Control
+# Odometry and Distance Control
 
-## Contract and ownership
+## 책임과 명령 의미
 
-The Pi remains the risk, planning, and safety authority. For a validated autonomous escape it repeats the same `motion_id` and `target_distance_cm` alongside the six existing UDP fields `{seq,t,vx,vy,w,status}`. `seq` identifies packet freshness; `motion_id` identifies one bounded action. A packet without both optional fields continues in velocity mode. The ESP32 uses its 100 Hz loop and encoder counts to stop locally. No Pi timing assumption is needed at the distance boundary.
+`cmd_vel`은 최신 명령이 이전 desired body velocity를 교체한다. `cmd_move`는 ESP32 motion
+state가 완료, STOP, fault, 취소 또는 다른 motion request까지 소유하는 지속 목표다. 두 명령은
+같은 `NormalizedCommand` acceptance를 거치지만 실행 의미를 공유하지 않는다.
 
-The ESP32 boots stopped and requires a fresh valid STOP before any distance goal. STOP, invalid command, watchdog, Wi-Fi loss, and encoder fault cancel the goal and command PWM zero. A completed or canceled ID is retained and cannot restart from another RUN packet; a new ID is required. The Pi chooses a random positive starting ID each process, observes the ESP32 `boot_id`, sends STOP on a changed boot ID, and only then starts a new goal. This does not change the existing `seq` resynchronization policy. A completed goal causes Pi STOP until a later perception revision; risk and escape are then recomputed before a new ID is issued.
+MOVE 예시:
 
-## Encoder assumption and wheel distance
-
-The firmware ISR counts **A phase RISING** edges and reads B for direction, with optional per-motor sign inversion. Current nominal settings are raw encoder PPR 11, gear ratio 74.83, quadrature multiplier 1, so `COUNTS_PER_OUTPUT_REV = 823.13`. This is a software assumption, not a measured wheel value. The sign, PPR definition, effective quadrature factor, and gear ratio must be checked on each physical motor. Wheel displacement is `delta_count * 2π * WHEEL_RADIUS_CM / COUNTS_PER_OUTPUT_REV`, with nominal radius 2.9 cm. Absolute encoder snapshots are not reset by a new goal; successive deltas are checked for implausible jumps.
-
-## Coordinate convention and forward kinematics
-
-Robot +X is FRONT, +Y is LEFT, positive heading is counterclockwise. The existing inverse maps body `(vx,vy,w)` to wheels at 0°, 120°, 240° with `wheel_i = -sin(angle_i) vx + cos(angle_i) vy + ROBOT_RADIUS_CM*w`. Its exact inverse for wheel displacements `(d1,d2,d3)` is:
-
-```text
-dx = (d3 - d2) / sqrt(3)
-dy = (2*d1 - d2 - d3) / 3
-dtheta = (d1 + d2 + d3) / (3*ROBOT_RADIUS_CM)
+```json
+{"type":"cmd_move","session_id":38192014,"seq":102,
+ "motion_id":20,"status":"RUN","vx":10.0,"vy":0.0,"w":0.0,
+ "target_distance_cm":30.0}
 ```
 
-The ESP32 integrates each body delta in the goal-start frame using midpoint heading. The initial goal direction is unit `(ux,uy)` from the first command. `goal_progress_cm = action_dx_cm*ux + action_dy_cm*uy`; `lateral_error_cm = -action_dx_cm*uy + action_dy_cm*ux`. Thus side drift and total wheel or Euclidean travel do not count toward the target. Project H supports translation goals with `w≈0`; it reports rotation drift but does not correct heading. Initial stop threshold is `target_distance_cm - 0.5 cm`; physical overshoot is separate and unmeasured.
+같은 `motion_id`와 같은 방향·거리는 watchdog liveness만 갱신하고 goal origin을 초기화하지
+않는다. 같은 ID에서 방향 또는 거리가 바뀌면 protocol fault와 즉시 정지다. 완료된 ID는
+GOAL_REACHED에 남고 다른 ID만 새 목표를 시작한다.
 
-## State and telemetry
+## Encoder와 좌표계
 
-Local modes are `IDLE`, `VELOCITY_CONTROL`, `DISTANCE_CONTROL`, `GOAL_REACHED`, `STOPPED`. The optional telemetry extension contains `boot_id`, `motion_id`, `goal_active`, `goal_reached`, `target_distance_cm`, `goal_progress_cm`, `remaining_distance_cm`, `action_dx_cm`, `action_dy_cm`, `action_dtheta_rad`, and `lateral_error_cm`. Existing telemetry fields remain. The Pi rejects nonfinite or malformed optional values. The monitor and other old consumers may ignore them.
+Robot +X는 전방, +Y는 좌측, positive heading은 CCW다. Wheel angle은 M1/M2/M3
+0/120/240°다. ISR은 A-phase RISING에서 B를 읽는 x1 count다. 초기 설정 898
+counts/output-rev는 측정 출발값이며 실제 조립 상태별 확인이 필요하다.
 
-## Hardware verification procedure
+Wheel displacement:
 
-With wheels raised, measure one output revolution on each motor and record count magnitude and sign in both directions. Confirm ISR edge mode, actual counts/rev, and wheel circumference before ground tests. Then place the robot in a clear, guarded area and measure physical displacement for FRONT/BACK/LEFT/RIGHT/diagonal 30 cm, WARN 15 cm, DANGER 30 cm. Record target, projected encoder progress, physical X/Y, heading drift, overshoot, lateral drift, floor material, and repeated trials. Test repeated packets for a completed ID, new ID, STOP mid-goal, Wi-Fi loss, Pi crash, and ESP32 restart. Calibrate `COUNTS_PER_OUTPUT_REV` or effective wheel radius only from those measurements. Until then PROJECT H is software verified only, not hardware verified.
+```text
+distance_cm = delta_count * 2*pi*wheel_radius_cm / counts_per_rev
+```
+
+Forward kinematics:
+
+```text
+dx     = (d3 - d2) / sqrt(3)
+dy     = (2*d1 - d2 - d3) / 3
+dtheta = (d1 + d2 + d3) / (3*robot_radius)
+```
+
+각 tick은 midpoint heading으로 goal-start frame의 `odom_dx_cm`, `odom_dy_cm`,
+`odom_dtheta_rad`를 적분한다.
+
+```text
+progress = odom_dx*ux + odom_dy*uy
+lateral  = -odom_dx*uy + odom_dy*ux
+```
+
+Encoder jump 한계는 고정 2000 count가 아니다. 20cm/s wheel limit, circumference,
+counts/rev, 실제 dt로 계산한 이론 count에 3배 margin을 적용한다.
+
+## Braking과 완료
+
+남은 거리에 따른 translation 상한:
+
+```text
+v_allowed = sqrt(2 * BODY_DECEL_CM_S2 * max(remaining_cm, 0))
+```
+
+requested cruise보다 braking bound가 작아지면 `DISTANCE_BRAKING`으로 전환한다. Overshoot가
+발생하면 reverse correction을 하지 않고 즉시 PWM 0을 쓰며 `overshoot_cm`을 기록한다.
+
+GOAL_REACHED에는 다음 조건이 모두 필요하다.
+
+- `abs(remaining_cm) <= 0.5cm`
+- 최대 measured wheel speed `<= 0.8cm/s`
+- `abs(lateral_error_cm) <= 2.0cm`
+- encoder와 odometry가 valid
+
+5cm를 넘는 lateral deviation은 `PATH_DEVIATION` fault다.
+
+## Software 검증과 실물 검증
+
+constexpr math assertions와 Python model tests는 pure X/Y/rotation, IK/FK round trip,
+progress/lateral 분리, derived encoder threshold, slew, braking, motion ID lifecycle,
+completion gate, overshoot no-reverse를 확인한다. 이는 실제 slip, wheel diameter, encoder
+polarity, chassis alignment를 확인하지 않는다.
+
+실물 시험에서는 count/rev와 부호를 먼저 측정한 후 10cm/s wheel, +X, +Y, rotation,
+15cm, 30cm 순으로 진행한다. 각 시험에서 target/measured/PWM/count, physical X/Y,
+heading drift, lateral drift, overshoot를 기록한다.

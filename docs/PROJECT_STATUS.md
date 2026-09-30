@@ -6,12 +6,12 @@
 |---|---|---|
 | A Pi Core Controller | SOFTWARE_VERIFIED | 독립 30 Hz/5 Hz 루프, snapshot, stale/예외/telemetry/자동 이동 OFF를 로컬 테스트로 확인. 실제 Pi 지연과 ESP32 watchdog 미검증 |
 | B Laptop Camera & Monitoring | SOFTWARE_VERIFIED | 카메라 실패·재연결/MJPEG/UDP 오류·만료/UI 종료를 가짜 장치와 루프백으로 검증. USB 카메라와 실제 네트워크 미검증 |
-| C ESP32 Motion Controller | SOFTWARE_VERIFIED | Pi interface 테스트 및 ESP32 generic board 소스 컴파일 통과. 실제 보드 flash·모터·watchdog 실기 미검증 |
+| C ESP32 Motion Controller | SOFTWARE_VERIFIED | Modular typed controller, safety/protocol/motion model tests, ESP32 Core 3.3.12 compile 통과. 실제 board upload·motor·watchdog 실기 미검증 |
 | D Vision & Environment Perception | SOFTWARE_VERIFIED | VisionState·8방향·실패/신선도·좌표계 가짜 입력 테스트. 실제 카메라·ArUco·YOLO 실영상 미검증 |
 | E Radar Perception | IN_PROGRESS | UDP fake/replay RadarState 경계 검증. 실제 firmware packet 명세·serial sample·parser가 없어 SAMPLE SERIAL FRAME REQUIRED |
 | F Sensor Fusion & Risk | SOFTWARE_VERIFIED | D/E snapshot의 유효성·신선도, 다중 target·sector·TTC·EMA/hold를 fake 입력으로 검증. 실제 radar 거리·부호·지연 교정 없음 |
 | G Escape Planning & Safety | SOFTWARE_VERIFIED | 8방향·UNKNOWN fallback·속도·Safety STOP 경계를 합성 입력으로 검증. 자동 모션 기본 OFF, 실기 미검증 |
-| H Odometry & Distance Control | SOFTWARE_VERIFIED | encoder 거리·3WD 순/역 정합 수식 검증, 로컬 목표 종료 코드 ESP32 generic 보드 컴파일, Pi goal lifecycle·호환 UDP 테스트. 실제 count 배율·15/30cm 정확도 미검증 |
+| H Odometry & Distance Control | SOFTWARE_VERIFIED | IK/FK, derived count limit, braking, motion ID, completion gate, typed host protocol 및 ESP32 compile 검증. 실제 count/rev·15/30cm 정확도 미검증 |
 
 기존 기준선: `python -B -m unittest discover -s tests -v` 11개 통과 (2026-09-16, PROJECT A 수정 전). 변경별 테스트와 하드웨어 잔여 항목은 이 문서에 갱신한다.
 
@@ -97,3 +97,17 @@ G는 합성 WorldState/RiskState로 SOFTWARE_VERIFIED한다. G에서는 15/30cm�
 | 수식·보정·실기 측정 절차 | `docs/ODOMETRY_DISTANCE_CONTROL.md`, 관련 README/architecture 문서 | 코드·문서 대조 | 15/30cm 전 방향 반복 측정 |
 
 H는 **SOFTWARE_VERIFIED**다. `python -B -m unittest discover -s tests -q`: 72개 통과 (2026-09-16). Arduino-ESP32 3.3.11, ArduinoJson 7.4.3, `esp32:esp32:esp32` 컴파일 성공: 947123 bytes flash (72%), 48636 bytes global RAM (14%). 실제 보드 flash, 모터 구동, 위치 정확도 측정은 수행하지 않았으며 HARDWARE_VERIFIED가 아니다. A·B·C·D·F·G 상태는 유지하고 E는 IN_PROGRESS / HARDWARE INPUT REQUIRED다.
+
+## 2026-09-30 ESP32 controller redesign
+
+| 변경 | 소프트웨어 근거 | 하드웨어 잔여 |
+|---|---|---|
+| 516-line composition sketch와 config/motor/protocol/motion/safety 모듈 | Arduino-ESP32 3.3.12 + ArduinoJson 7.4.3 compile, 949911 bytes flash, 49004 bytes global RAM | board upload, STBY/direction/PWM electrical behavior |
+| typed session protocol, latest-wins mailbox, bounded UDP | duplicate/stale/session restart/heartbeat/latest motion/flood budget 계약 테스트 | 실제 UDP flood와 100Hz jitter 측정 |
+| velocity/distance 상태 분리, braking, completion gates | pure model과 constexpr IK/FK/odometry/braking assertions | slip, count/rev, wheel radius, 15/30cm accuracy |
+| immediate STOP/FAULT와 reset handshake | watchdog/wraparound/recovery/source-order 테스트 | 실제 STOP latency, Wi-Fi loss, controller restart |
+| Windows/Pi typed migration와 legacy telemetry fallback | 전체 `pytest`: 152 passed + 33 subtests, py_compile, hidden Tk smoke | 실제 Laptop/Pi/ESP32 왕복과 장시간 안정성 |
+
+이 결과는 C와 H의 `SOFTWARE_VERIFIED`를 갱신한다. 실제 모터는 실행하지 않았고
+`HARDWARE_VERIFIED` 주장은 하지 않는다. Physical test 순서는
+[ESP32 Motion Controller Reference](ESP32_MOTION_CONTROLLER.md)에 고정했다.
