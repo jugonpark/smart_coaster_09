@@ -1,0 +1,7 @@
+arduino/esp32_omni_controller/secrets.h
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+.arduino-build/
+

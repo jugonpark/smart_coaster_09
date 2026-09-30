@@ -1,23 +1,60 @@
 #pragma once
-#include <math.h>
+
+#include <float.h>
 #include <stdint.h>
 
-// Inverse of wheel_i = -sin(angle_i)*vx + cos(angle_i)*vy + radius*w
-// for wheel angles 0, 120, 240 degrees. Units: cm, radians.
 struct BodyDelta {
     float dx;
     float dy;
     float dtheta;
 };
 
-constexpr float wheelDistanceCm(int64_t counts, float countsPerRev, float wheelRadiusCm) {
-    return (float)counts * (2.0f * 3.14159265358979323846f * wheelRadiusCm) / countsPerRev;
+struct WheelSpeeds {
+    float value[3];
+};
+
+constexpr float absFloat(float value) {
+    return value < 0.0f ? -value : value;
 }
 
-constexpr BodyDelta forwardKinematics(float d1, float d2, float d3, float robotRadiusCm) {
+constexpr bool finiteFloat(float value) {
+    return value == value && value <= FLT_MAX && value >= -FLT_MAX;
+}
+
+constexpr float sqrtPositive(float value) {
+    if (!(value > 0.0f) || !finiteFloat(value)) {
+        return 0.0f;
+    }
+    float estimate = value > 1.0f ? value : 1.0f;
+    for (int i = 0; i < 16; ++i) {
+        estimate = 0.5f * (estimate + value / estimate);
+    }
+    return estimate;
+}
+
+constexpr WheelSpeeds inverseKinematicsBody(float vxCmS, float vyCmS,
+                                             float wRadS, float robotRadiusCm) {
+    constexpr float HALF = 0.5f;
+    constexpr float SQRT3_OVER_2 = 0.8660254037844386f;
+    return {{{vyCmS + robotRadiusCm * wRadS,
+              -SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS,
+              SQRT3_OVER_2 * vxCmS - HALF * vyCmS + robotRadiusCm * wRadS}}};
+}
+
+constexpr BodyDelta forwardKinematics(float d1, float d2, float d3,
+                                      float robotRadiusCm) {
     return {(d3 - d2) / 1.7320508075688772f,
             (2.0f * d1 - d2 - d3) / 3.0f,
             (d1 + d2 + d3) / (3.0f * robotRadiusCm)};
+}
+
+constexpr float wheelDistanceCm(int64_t counts, float countsPerRev,
+                                float wheelRadiusCm) {
+    return countsPerRev > 0.0f
+               ? static_cast<float>(counts) *
+                     (2.0f * 3.14159265358979323846f * wheelRadiusCm) /
+                     countsPerRev
+               : 0.0f;
 }
 
 constexpr float goalProgressCm(const BodyDelta &delta, float ux, float uy) {
@@ -28,45 +65,42 @@ constexpr float lateralErrorCm(const BodyDelta &delta, float ux, float uy) {
     return -delta.dx * uy + delta.dy * ux;
 }
 
-constexpr bool canStartDistanceGoal(bool armed, bool networkMode,
-                                    int32_t incomingId, int32_t previousId) {
-    return armed && networkMode && incomingId >= 0 && incomingId != previousId;
+constexpr int64_t encoderDeltaLimitCounts(float wheelLimitCmS,
+                                          float wheelRadiusCm,
+                                          float countsPerRev,
+                                          float dtSec,
+                                          float safetyMargin) {
+    if (!(wheelLimitCmS > 0.0f) || !(wheelRadiusCm > 0.0f) ||
+        !(countsPerRev > 0.0f) || !(dtSec > 0.0f) ||
+        !(safetyMargin >= 1.0f)) {
+        return 0;
+    }
+    const float circumference = 2.0f * 3.14159265358979323846f * wheelRadiusCm;
+    const float expected = wheelLimitCmS * dtSec * countsPerRev / circumference;
+    return static_cast<int64_t>(expected * safetyMargin) + 1;
 }
 
-constexpr bool distanceGoalReached(float progress, float target, float tolerance) {
-    return progress >= target - tolerance;
+constexpr float brakingSpeedLimit(float decelerationCmS2, float remainingCm) {
+    if (!finiteFloat(decelerationCmS2) || !finiteFloat(remainingCm) ||
+        decelerationCmS2 <= 0.0f || remainingCm <= 0.0f) {
+        return 0.0f;
+    }
+    return sqrtPositive(2.0f * decelerationCmS2 * remainingCm);
 }
 
-static_assert(forwardKinematics(0, -1.7320508f, 1.7320508f, 9).dx > 1.99f,
-              "front motion must be positive X");
-static_assert(forwardKinematics(1, -0.5f, -0.5f, 9).dy > 0.99f,
-              "left motion must be positive Y");
-static_assert(forwardKinematics(9, 9, 9, 9).dtheta == 1.0f,
-              "positive wheel rotation must be positive heading");
-static_assert(goalProgressCm(forwardKinematics(1, -0.5f, -0.5f, 9), 1, 0) == 0,
-              "lateral drift must not count as goal progress");
-static_assert(forwardKinematics(0, 1.7320508f, -1.7320508f, 9).dx < -1.99f,
-              "back motion must be negative X");
-static_assert(forwardKinematics(-1, 0.5f, 0.5f, 9).dy < -0.99f,
-              "right motion must be negative Y");
-static_assert(forwardKinematics(-0.7071068f, 0.9659258f, -0.258819f, 9).dx < -0.7f,
-              "diagonal motion must preserve X");
-static_assert(wheelDistanceCm(82313, 823.13f, 2.9f) > 1800.0f,
-              "wheel count conversion must include circumference");
-constexpr BodyDelta back29 = forwardKinematics(0, 25.1147367f, -25.1147367f, 9);
-constexpr BodyDelta back30 = forwardKinematics(0, 25.9807621f, -25.9807621f, 9);
-static_assert(goalProgressCm(back29, -1, 0) < 29.5f &&
-              goalProgressCm(back30, -1, 0) >= 29.5f,
-              "30 cm back goal changes state at the threshold");
-static_assert(!distanceGoalReached(goalProgressCm(back29, -1, 0), 30, 0.5f) &&
-              distanceGoalReached(goalProgressCm(back30, -1, 0), 30, 0.5f) &&
-              distanceGoalReached(14.5f, 15, 0.5f),
-              "15 and 30 cm stop thresholds");
-static_assert(!canStartDistanceGoal(false, true, 12, 11) &&
-              !canStartDistanceGoal(true, true, 11, 11) &&
-              !canStartDistanceGoal(true, false, 12, 11) &&
-              canStartDistanceGoal(true, true, 12, 11),
-              "completed or canceled ID cannot restart; STOP must arm a new ID");
-static_assert(goalProgressCm(forwardKinematics(1, -0.5f, -0.5f, 9), 1, 0) == 0 &&
-              lateralErrorCm(forwardKinematics(1, -0.5f, -0.5f, 9), 1, 0) == 1,
-              "lateral motion must stay separate from progress");
+constexpr float slewTowards(float current, float target, float ratePerSec,
+                            float dtSec) {
+    if (!finiteFloat(current) || !finiteFloat(target) ||
+        !(ratePerSec > 0.0f) || !(dtSec > 0.0f)) {
+        return current;
+    }
+    const float maxStep = ratePerSec * dtSec;
+    const float error = target - current;
+    if (error > maxStep) {
+        return current + maxStep;
+    }
+    if (error < -maxStep) {
+        return current - maxStep;
+    }
+    return target;
+}
